@@ -117,10 +117,16 @@ export function historyDeleteGhostCopy(
   return { label: `${target.threadIds.length} 个聊天记录`, detail: "拖到垃圾桶删除" };
 }
 
+type HistoryDeleteDragTargetLike = {
+  closest?: (selector: string) => unknown;
+  parentElement?: { closest?: (selector: string) => unknown } | null;
+};
+
 export function shouldIgnoreHistoryDeleteDragFrom(
-  target: { closest?: (selector: string) => unknown; parentElement?: { closest?: (selector: string) => unknown } } | null | undefined
+  target: EventTarget | HistoryDeleteDragTargetLike | null | undefined
 ): boolean {
-  const element = typeof target?.closest === "function" ? target : target?.parentElement;
+  const candidate = target && typeof target === "object" ? target as HistoryDeleteDragTargetLike : null;
+  const element = typeof candidate?.closest === "function" ? candidate : candidate?.parentElement;
   return typeof element?.closest === "function" && Boolean(element.closest(HISTORY_DELETE_DRAG_IGNORE_SELECTOR));
 }
 

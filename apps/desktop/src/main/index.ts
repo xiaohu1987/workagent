@@ -589,6 +589,9 @@ async function createWindow(): Promise<void> {
   mainWindow.webContents.on("unresponsive", () => {
     void backend.appendRuntimeLog("renderer.unresponsive", { url: mainWindow?.webContents.getURL() ?? "" });
   });
+  mainWindow.webContents.on("responsive", () => {
+    void backend.appendRuntimeLog("renderer.responsive", { url: mainWindow?.webContents.getURL() ?? "" });
+  });
   mainWindow.webContents.on("console-message", (...args: unknown[]) => {
     const details = typeof args[1] === "object" && args[1] !== null
       ? args[1] as { level?: string; message?: string; lineNumber?: number; sourceId?: string }
@@ -739,6 +742,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("documents:read-file", (_event, payload: { path: string }) =>
     backend.readDocumentFileByPath(payload.path));
+  // 查看文档：只查最后修改时间，用于提醒源文件已在面板外被改过；不读内容，轮询开销很小。
+  ipcMain.handle("documents:stat-files", (_event, payload: { paths: string[] }) =>
+    backend.statDocumentFilesByPath(payload.paths));
   // 查看文档（页签）：一次可选多个文件，每个文件在渲染层各开一个页签。
   ipcMain.handle("documents:choose-files", async (_event, payload?: { extensions?: string[] }) => {
     const extensions = (payload?.extensions ?? []).filter((extension) => /^[a-z0-9]+$/i.test(extension));

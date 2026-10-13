@@ -1039,7 +1039,7 @@ export class DesktopBackend {
   }
 
   /** 查看文档：按绝对路径读取，供聊天区内的文档查看器使用，与项目文件预览共用同一套编码探测与截断策略。 */
-  public async readDocumentFileByPath(absolutePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean }> {
+  public async readDocumentFileByPath(absolutePath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean; mtimeMs: number }> {
     const target = path.resolve(absolutePath);
     const stats = await fs.stat(target);
     if (!stats.isFile()) {
@@ -1054,8 +1054,30 @@ export class DesktopBackend {
       path: target,
       content: decoded?.content ?? "Binary file preview is not available.",
       truncated: buffer.length > limit,
-      binary: !decoded
+      binary: !decoded,
+      mtimeMs: stats.mtimeMs
     };
+  }
+
+  /**
+   * 查看文档：只取最后修改时间，用来判断源文件是否在面板之外被改过。
+   * 与读取分开，轮询时不必把整份内容再搬一次内存；读不到的文件返回 null，
+   * 由渲染层按「无法判断」处理，不会误报成已更新。
+   */
+  public async statDocumentFilesByPath(
+    absolutePaths: string[]
+  ): Promise<Array<{ path: string; mtimeMs: number | null }>> {
+    return Promise.all(
+      absolutePaths.map(async (absolutePath) => {
+        const target = path.resolve(absolutePath);
+        try {
+          const stats = await fs.stat(target);
+          return { path: target, mtimeMs: stats.isFile() ? stats.mtimeMs : null };
+        } catch {
+          return { path: target, mtimeMs: null };
+        }
+      })
+    );
   }
 
   /**

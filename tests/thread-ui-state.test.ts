@@ -16,8 +16,10 @@ import {
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldPreserveObservedRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldRefreshSelectedSnapshotForToolEvent,
   shouldForceFullSnapshotForRuntimeCompletion,
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
@@ -27,6 +29,11 @@ import {
   queueThreadSettingWrite,
   waitForPendingThreadSettingWrites
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
+import {
+  appendRuntimeOutputBatch,
+  MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS,
+  type RuntimeActivityOutput
+} from "../apps/desktop/src/renderer/core/runtime-activity";
 import {
   buildTimelineEntries,
   buildTimelineEntriesIncremental,
@@ -53,12 +60,14 @@ import {
   isPatchAssistantMessage,
   getAssistantDraftDisplayContent,
   mergeSnapshotRecords,
+  mergeRuntimeToolCallSummaries,
   reconcilePendingUserMessages,
   reconcilePendingUserMessagesDetailed,
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftReasoningUpdate,
   reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
+  applyAssistantDraftUpdateBatch,
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   rewindThreadSnapshotForMessageEdit,
@@ -336,6 +345,14 @@ describe("thread UI state helpers", () => {
       "parent-thread"
     )).toBe(true);
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent("parent-thread")).toBe(true);
+  });
+
+  it("refreshes selected tool events only when there is no snapshot to patch or read in flight", () => {
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", false, null, false)).toBe(true);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", true, null, false)).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", false, "thread-1", false)).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", false, null, true)).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-2", false, null, false)).toBe(false);
   });
 
   it("does not abort a parent snapshot refresh for child-status echoes", () => {
@@ -860,10 +877,16 @@ describe("thread UI state helpers", () => {
     expect(shouldShowTaskProcessing("waiting", false)).toBe(true);
     expect(shouldShowTaskProcessing("idle", true)).toBe(true);
     expect(shouldShowTaskProcessing("idle", false)).toBe(false);
+    // Runtime tool events can beat the thread.updated snapshot; preserve the
+    // active turn until the snapshot catches up so its tool group is not folded.
+    expect(shouldShowTaskProcessing("idle", false, true)).toBe(true);
+    expect(shouldShowTaskProcessing(null, false, true)).toBe(true);
     expect(shouldShowTaskProcessing("completed", true)).toBe(false);
     expect(shouldShowTaskProcessing("completed", false)).toBe(false);
+    expect(shouldShowTaskProcessing("completed", false, true)).toBe(false);
     expect(shouldShowTaskProcessing("failed", true)).toBe(false);
     expect(shouldShowTaskProcessing("failed", false)).toBe(false);
+    expect(shouldShowTaskProcessing("failed", false, true)).toBe(false);
   });
 
   it("keeps a just-submitted message out of the queue during the runtime handoff", () => {
@@ -872,6 +895,14 @@ describe("thread UI state helpers", () => {
     expect(shouldPreservePreparingRuntime("idle", 0, false)).toBe(false);
     expect(shouldPreservePreparingRuntime("completed", 0, false)).toBe(false);
     expect(shouldPreservePreparingRuntime("idle", 1, true)).toBe(false);
+  });
+
+  it("keeps observed runtime work through a stale idle snapshot", () => {
+    expect(shouldPreserveObservedRuntime("idle", true, false)).toBe(true);
+    expect(shouldPreserveObservedRuntime("running", true, false)).toBe(false);
+    expect(shouldPreserveObservedRuntime("completed", true, false)).toBe(false);
+    expect(shouldPreserveObservedRuntime("idle", true, true)).toBe(false);
+    expect(shouldPreserveObservedRuntime("idle", false, false)).toBe(false);
   });
 
   it("shows a spinner affordance for executing history items", () => {
@@ -1078,6 +1109,45 @@ describe("runtime activity visibility", () => {
   it("only keeps the execution heartbeat visible while the task is still active", () => {
     expect(shouldShowRuntimeActivityPanel(true)).toBe(true);
     expect(shouldShowRuntimeActivityPanel(false)).toBe(false);
+  });
+
+  it("merges adjacent terminal chunks and preserves command boundaries", () => {
+    const output = (id: string, label: string, content: string): RuntimeActivityOutput => ({
+      id,
+      kind: "output",
+      label,
+      content,
+      createdAt: `2026-10-13T10:00:0${id.length}.000Z`
+    });
+    const first = appendRuntimeOutputBatch(undefined, "thread-a", [output("one", "$ build", "part 1")]);
+    const second = appendRuntimeOutputBatch(first, "thread-a", [
+      output("two", "$ build", " + part 2"),
+      output("three", "$ test", "test output")
+    ]);
+
+    expect(second.entries).toEqual([
+      { ...output("one", "$ build", "part 1"), content: "part 1 + part 2" },
+      output("three", "$ test", "test output")
+    ]);
+  });
+
+  it("bounds long output rows and retains the existing activity start time", () => {
+    const output = (content: string): RuntimeActivityOutput => ({
+      id: "output-1",
+      kind: "output",
+      label: "终端输出",
+      content,
+      createdAt: "2026-10-13T10:00:01.000Z"
+    });
+    const existing = {
+      threadId: "thread-a",
+      startedAt: "2026-10-13T09:59:00.000Z",
+      entries: []
+    };
+    const activity = appendRuntimeOutputBatch(existing, "thread-a", [output("x".repeat(MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS + 10))]);
+
+    expect(activity.startedAt).toBe(existing.startedAt);
+    expect((activity.entries[0] as RuntimeActivityOutput).content).toBe("x".repeat(MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS));
   });
 });
 
@@ -2081,6 +2151,45 @@ describe("assistant draft lifecycle", () => {
     expect(reconcileAssistantDraftUpdate({ [newer.draftId]: newer }, older)).toEqual({ [newer.draftId]: newer });
   });
 
+  it("applies only the newest queued draft update while preserving the active draft", () => {
+    const base = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "第一段",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false
+    };
+    const next = applyAssistantDraftUpdateBatch({ [base.draftId]: base }, [
+      { ...base, content: "第一段第二段" },
+      { ...base, content: "第一段第二段第三段", phase: "validating" }
+    ]);
+
+    expect(next).toEqual({
+      [base.draftId]: { ...base, content: "第一段第二段第三段", phase: "validating" }
+    });
+  });
+
+  it("does not let a delayed batch revive a completed draft", () => {
+    const completed = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "最终回复",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: true,
+      messageId: "message-1"
+    };
+
+    expect(applyAssistantDraftUpdateBatch({ [completed.draftId]: completed }, [
+      { ...completed, content: "迟到片段", completed: false, messageId: undefined }
+    ])).toEqual({ [completed.draftId]: completed });
+  });
+
   it("replaces an older same-thread draft when the next model request starts", () => {
     const older = {
       draftId: "draft-1",
@@ -2278,6 +2387,23 @@ describe("incremental snapshot merging", () => {
     };
 
     expect(upsertRuntimeToolCallSummary([older], running)).toEqual([older, running]);
+  });
+
+  it("does not let a stale snapshot roll a completed tool call back to running", () => {
+    const asSummary = (overrides: Partial<ToolCallRecord>): ToolCallSummary => ({
+      ...makeToolCall(overrides),
+      resultSize: 0,
+      hasFullResult: true
+    });
+    const running = asSummary({ status: "running", resultJson: null, completedAt: null });
+    const completed = asSummary({
+      status: "completed",
+      resultJson: "{\"ok\":true}",
+      completedAt: "2026-07-15T00:00:03.000Z"
+    });
+
+    expect(mergeRuntimeToolCallSummaries([running], [completed])).toEqual([completed]);
+    expect(mergeRuntimeToolCallSummaries([completed], [running])).toEqual([completed]);
   });
 
   it("completes an existing live tool without losing its arguments", () => {

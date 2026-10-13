@@ -5,6 +5,7 @@ import {
   getDocumentFileName,
   getNextUntitledDocumentTitle,
   getUntitledDocumentSuggestedFileName,
+  hasDocumentSourceChanged,
   resolveDocumentViewKind,
   type DocumentViewKind,
   type DocumentViewMode
@@ -30,6 +31,10 @@ export type DocumentTab = {
   binary: boolean;
   loading: boolean;
   error: string | null;
+  /** 打开或保存时记下的源文件最后修改时间；为 null 时不做「已更新」提醒。 */
+  sourceMtimeMs: number | null;
+  /** 磁盘上的源文件已在面板之外被改过，等用户决定重新加载还是保留当前内容。 */
+  sourceChanged: boolean;
 };
 
 /** 需要用户先决定存不存的待办：关掉某个页签，或整个收起面板。 */
@@ -44,6 +49,8 @@ export type DocumentTabsController = {
   pendingAction: DocumentPendingAction | null;
   picking: boolean;
   dirtyCount: number;
+  /** 被磁盘改动过的页签标题，面板据此显示提醒与处理入口。 */
+  changedSourceTitles: string[];
   openDocuments: () => Promise<void>;
   openDroppedPaths: (paths: string[]) => Promise<void>;
   newBlankDocument: () => void;
@@ -56,6 +63,12 @@ export type DocumentTabsController = {
   setTabMode: (tabId: string, mode: DocumentViewMode) => void;
   saveTab: (tabId: string) => Promise<boolean>;
   saveTabAs: (tabId: string) => Promise<boolean>;
+  /** 检查磁盘上的源文件是否变了；面板打开期间按间隔调用。 */
+  checkSourceUpdates: () => Promise<void>;
+  /** 重新加载被标记的页签，未保存的修改会被磁盘版本替换。 */
+  reloadSourceUpdates: () => Promise<void>;
+  /** 忽略提醒：保留页签内容，只把基线对齐到磁盘版本。 */
+  keepSourceVersions: () => Promise<void>;
 };
 
 /**
@@ -106,7 +119,9 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
       truncated: false,
       binary: false,
       loading: true,
-      error: null
+      error: null,
+      sourceMtimeMs: null,
+      sourceChanged: false
     };
   }, []);
 
@@ -122,7 +137,9 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
           binary: result.binary,
           lineEnding: detectLineEnding(result.content),
           loading: false,
-          error: null
+          error: null,
+          sourceMtimeMs: result.mtimeMs,
+          sourceChanged: false
         });
       } catch (error) {
         patchTab(tabId, {
@@ -232,12 +249,81 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
       truncated: false,
       binary: false,
       loading: false,
-      error: null
+      error: null,
+      sourceMtimeMs: null,
+      sourceChanged: false
     };
     applyTabs((latest) => [...latest, tab]);
     setActiveTabId(tab.id);
     setPendingAction(null);
   }, [applyTabs]);
+
+  /**
+   * 把自己的一次保存也排除在「外部更新」之外：刚写完盘就把基线对齐到新的时间戳，
+   * 否则保存本身会被下一次检查误判成磁盘版本变了。
+   */
+  const refreshSourceBaseline = useCallback(
+    async (tabId: string) => {
+      const tab = tabsRef.current.find((item) => item.id === tabId);
+      if (!tab?.path) {
+        return;
+      }
+      try {
+        const [stamp] = await window.codexh.statDocumentFiles({ paths: [tab.path] });
+        patchTab(tabId, { sourceMtimeMs: stamp?.mtimeMs ?? null, sourceChanged: false });
+      } catch {
+        // 查不到就保留原基线，下一次检查会重新判断。
+      }
+    },
+    [patchTab]
+  );
+
+  /**
+   * 面板打开期间检查源文件更新：只对已经落盘的页签查最后修改时间，
+   * 与基线不一致就标记出来，由用户在界面上决定重新加载还是保留当前内容。
+   * 结果按请求顺序对应页签，因此不依赖两边路径字符串完全一致。
+   */
+  const checkSourceUpdates = useCallback(async () => {
+    const targets = tabsRef.current.filter((tab) => Boolean(tab.path) && !tab.binary);
+    if (targets.length === 0) {
+      return;
+    }
+    try {
+      const stamps = await window.codexh.statDocumentFiles({ paths: targets.map((tab) => tab.path) });
+      const mtimeByTabId = new Map<string, number | null>();
+      targets.forEach((tab, index) => {
+        const stamp = stamps[index];
+        if (stamp) {
+          mtimeByTabId.set(tab.id, stamp.mtimeMs);
+        }
+      });
+      applyTabs((current) =>
+        current.map((tab) => {
+          if (!mtimeByTabId.has(tab.id)) {
+            return tab;
+          }
+          const changed = hasDocumentSourceChanged(tab.sourceMtimeMs, mtimeByTabId.get(tab.id) ?? null);
+          return changed === tab.sourceChanged ? tab : { ...tab, sourceChanged: changed };
+        })
+      );
+    } catch {
+      // 检查失败不打扰用户，下一个间隔会重试。
+    }
+  }, [applyTabs]);
+
+  const reloadSourceUpdates = useCallback(async () => {
+    const targets = tabsRef.current.filter((tab) => tab.sourceChanged && tab.path);
+    for (const tab of targets) {
+      await loadTab(tab.id, tab.path);
+    }
+  }, [loadTab]);
+
+  const keepSourceVersions = useCallback(async () => {
+    const targets = tabsRef.current.filter((tab) => tab.sourceChanged && tab.path);
+    for (const tab of targets) {
+      await refreshSourceBaseline(tab.id);
+    }
+  }, [refreshSourceBaseline]);
 
   const selectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
@@ -289,6 +375,8 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
           binary: false,
           error: null
         });
+        // 换了路径要重新记基线，否则刚另存出来的文件会被当成「磁盘上有更新」。
+        await refreshSourceBaseline(tabId);
         return true;
       } catch (error) {
         patchTab(tabId, {
@@ -297,7 +385,7 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
         return false;
       }
     },
-    [patchTab]
+    [patchTab, refreshSourceBaseline]
   );
 
   const saveTab = useCallback(
@@ -321,6 +409,8 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
           content: applyLineEnding(tab.content, tab.lineEnding)
         });
         patchTab(tabId, { savedContent: tab.content, error: null });
+        // 保存本身也会改 mtime，先把基线推到这个新版本，免得自己触发一次更新提醒。
+        await refreshSourceBaseline(tabId);
         return true;
       } catch (error) {
         patchTab(tabId, {
@@ -329,7 +419,7 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
         return false;
       }
     },
-    [patchTab, saveTabAs]
+    [patchTab, refreshSourceBaseline, saveTabAs]
   );
 
   const requestCloseTab = useCallback(
@@ -408,6 +498,12 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
     [tabs]
   );
 
+  /** 被磁盘改动过的页签标题，面板据此显示一条提醒与两个处理入口。 */
+  const changedSourceTitles = useMemo(
+    () => tabs.filter((tab) => tab.sourceChanged).map((tab) => tab.title),
+    [tabs]
+  );
+
   return {
     tabs,
     activeTabId,
@@ -415,6 +511,7 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
     pendingAction,
     picking,
     dirtyCount,
+    changedSourceTitles,
     openDocuments,
     openDroppedPaths,
     newBlankDocument,
@@ -426,6 +523,9 @@ export function useDocumentTabs(onClosePanel: () => void): DocumentTabsControlle
     updateContent,
     setTabMode,
     saveTab,
-    saveTabAs
+    saveTabAs,
+    checkSourceUpdates,
+    reloadSourceUpdates,
+    keepSourceVersions
   };
 }

@@ -92,6 +92,8 @@ type Props = {
   apiFavoritesActive?: boolean;
   onOpenDocumentViewer: () => void;
   documentViewerActive?: boolean;
+  /** 查看文档入口右侧的数量：面板背后已打开的文档数，0 时入口不显示徽标。 */
+  documentViewerOpenCount?: number;
   /** Rail entries the user tucked into the "更多" flyout; empty keeps them inline. */
   hiddenSidebarItems?: SidebarNavItemId[];
   onOpenSearch: () => void;
@@ -111,7 +113,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
@@ -471,12 +473,21 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
     apiFavorites: apiFavoritesActive,
     documentViewer: documentViewerActive
   };
+  /**
+   * 入口上的可选数量：目前只有「查看文档」带一个，表示切走任务后仍留在面板里的文档数。
+   * 数量为 0 时入口不渲染任何徽标，侧栏保持干净。
+   */
+  const railItemCounts: Partial<Record<SidebarNavItemId, number>> = {
+    documentViewer: documentViewerOpenCount
+  };
 
   function renderRailItem(id: SidebarNavItemId) {
+    const count = railItemCounts[id] ?? 0;
     return (
       <button key={id} className={`sidebar-nav-button ${railItemActiveStates[id] ? "is-active" : ""}`} type="button" onClick={railItemHandlers[id]}>
         <span className="sidebar-nav-icon">{SIDEBAR_NAV_ITEM_ICONS[id]}</span>
         <span>{SIDEBAR_NAV_ITEM_LABELS[id]}</span>
+        {count > 0 ? <span className="sidebar-nav-count" aria-label={`已打开 ${count} 个文档`}>{count}</span> : null}
       </button>
     );
   }

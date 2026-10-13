@@ -58,6 +58,17 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(sidebar).toContain("documentViewerActive?: boolean;");
   });
 
+  it("入口显示已打开的文档数，数量为 0 时整块不渲染", () => {
+    // 数量由 App 的页签控制器透传，侧栏只负责展示，不自己持有状态。
+    expect(app).toContain("documentViewerOpenCount={documentTabs.tabs.length}");
+    expect(sidebar).toContain("documentViewerOpenCount?: number;");
+    expect(sidebar).toContain("documentViewerOpenCount = 0");
+    expect(sidebar).toContain("const count = railItemCounts[id] ?? 0;");
+    // 0 时不输出任何节点，所以不需要靠 CSS 隐藏。
+    expect(sidebar).toContain('{count > 0 ? <span className="sidebar-nav-count"');
+    expect(styles).toContain(".sidebar-nav-count {");
+  });
+
   it("面板渲染在聊天画布内，排在聊天记录与输入区之前", () => {
     const canvasStart = app.indexOf("<section className={`chat-canvas");
     expect(canvasStart).toBeGreaterThanOrEqual(0);
@@ -70,9 +81,7 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(panelIndex).toBeGreaterThan(canvasStart);
     expect(scrollIndex).toBeGreaterThan(panelIndex);
     const panelEnd = app.indexOf("/>", panelIndex);
-    expect(app.slice(panelIndex, panelEnd)).toContain(
-      "onClose={() => setIsDocumentViewerOpen(false)}"
-    );
+    expect(app.slice(panelIndex, panelEnd)).toContain("documents={documentTabs}");
     expect(app).toContain(
       'import { DocumentViewerPanel } from "./workspace/document-viewer-panel";'
     );
@@ -131,6 +140,26 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(newTaskFn).toContain("setIsDocumentViewerOpen(false);");
   });
 
+  it("切去看任务只让出聊天区，原来打开的文档不随面板卸载丢掉", () => {
+    // 页签集合挂在 App 层：面板卸载后已经打开的文档仍在，再点入口就能接着看。
+    expect(app).toContain('import { useDocumentTabs } from "./hooks/use-document-tabs";');
+    expect(app).toContain(
+      "const documentTabs = useDocumentTabs(() => setIsDocumentViewerOpen(false));"
+    );
+    expect(app).toContain("documents={documentTabs}");
+    // 面板不再自己持有页签状态，切任务收起面板时不会带走已打开的文档。
+    expect(panel).not.toContain("const documents = useDocumentTabs(");
+    expect(panel).toContain("documents: DocumentTabsController;");
+
+    const openThreadFn = section(
+      app,
+      "async function openThread(threadId: string",
+      "const isSwitchingThread"
+    );
+    expect(openThreadFn).toContain("setIsDocumentViewerOpen(false);");
+    expect(openThreadFn).not.toContain("documentTabs");
+  });
+
   it("按 Esc 能收起查看文档，并纳入快捷键依赖", () => {
     expect(app).toContain(
       "if (isDocumentViewerOpen) {\n          requestDocumentViewerClose();\n          return;\n        }"
@@ -138,10 +167,12 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(app).toContain(
       "isApiFavoritesOpen, isDocumentViewerOpen, isClearErrorSolutionsConfirmOpen"
     );
-    // 面板把 requestClosePanel 注册给 App，Esc 与侧栏再次点击才会先走未保存确认。
-    expect(app).toContain("const documentViewerCloseRef = useRef<(() => void) | null>(null);");
-    expect(app).toContain("onRegisterCloseRequest={(handler) => {");
-    expect(panel).toContain("onRegisterCloseRequest(requestClosePanel);");
+    // 页签集合在 App 层，Esc 与侧栏再次点击直接调这一层的 requestClosePanel，先过未保存确认。
+    expect(app).toContain(
+      "const documentTabs = useDocumentTabs(() => setIsDocumentViewerOpen(false));"
+    );
+    expect(app).toContain("documentTabs.requestClosePanel();");
+    expect(panel).not.toContain("onRegisterCloseRequest");
     const openEvent = section(
       app,
       "const openDocumentViewerEvent = useStableEvent(",
@@ -339,5 +370,104 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(utils).toContain("while (taken.has(getUntitledDocumentTitle(index))) {");
     expect(utils).toContain("export function getUntitledDocumentSuggestedFileName(title: string): string {");
     expect(utils).toContain("return `${title}.txt`;");
+  });
+
+  it("源文件被外部改动时给出提醒，是否重新加载由用户决定", () => {
+    // 纯逻辑只保留一份：是否变化、提醒文案都在 utils 里，面板只负责展示。
+    // 不做后台轮询，所以没有检查间隔常量：检查只在面板每次打开时触发一次。
+    expect(utils).not.toContain("DOCUMENT_SOURCE_CHECK_INTERVAL_MS");
+    expect(utils).toContain("export function hasDocumentSourceChanged(");
+    expect(utils).toContain("baseMtimeMs: number | null,");
+    expect(utils).toContain("export function describeDocumentSourceUpdate(titles: string[]): string {");
+
+    // 主进程只查最后修改时间，不读内容；渲染层拿时间戳与基线比对。
+    expect(main).toContain('ipcMain.handle("documents:stat-files"');
+    expect(main).toContain("backend.statDocumentFilesByPath(payload.paths)");
+    expect(preload).toContain('ipcRenderer.invoke("documents:stat-files", payload)');
+    expect(env).toContain("statDocumentFiles: (payload: { paths: string[] }) =>");
+
+    const checkFn = section(
+      tabs,
+      "const checkSourceUpdates = useCallback(",
+      "const reloadSourceUpdates = useCallback("
+    );
+    expect(checkFn).toContain("filter((tab) => Boolean(tab.path) && !tab.binary)");
+    expect(checkFn).toContain(
+      "await window.codexh.statDocumentFiles({ paths: targets.map((tab) => tab.path) });"
+    );
+    expect(checkFn).toContain(
+      "hasDocumentSourceChanged(tab.sourceMtimeMs, mtimeByTabId.get(tab.id) ?? null)"
+    );
+    expect(checkFn).toContain(
+      "return changed === tab.sourceChanged ? tab : { ...tab, sourceChanged: changed };"
+    );
+
+    // 自己保存完就把基线推到新版本，免得保存本身被当成一次外部更新。
+    const baselineFn = section(
+      tabs,
+      "const refreshSourceBaseline = useCallback(",
+      "const checkSourceUpdates = useCallback("
+    );
+    expect(baselineFn).toContain("sourceMtimeMs: stamp?.mtimeMs ?? null, sourceChanged: false");
+
+    // 两个出口：重新加载按磁盘版本覆盖，保留当前内容只把基线对齐。
+    const reloadFn = section(
+      tabs,
+      "const reloadSourceUpdates = useCallback(",
+      "const keepSourceVersions = useCallback("
+    );
+    expect(reloadFn).toContain("filter((tab) => tab.sourceChanged && tab.path)");
+    expect(reloadFn).toContain("await loadTab(tab.id, tab.path);");
+    const keepFn = section(tabs, "const keepSourceVersions = useCallback(", "const selectTab = useCallback(");
+    expect(keepFn).toContain("await refreshSourceBaseline(tab.id);");
+    expect(tabs).toContain("changedSourceTitles: string[];");
+    expect(tabs).toContain("const changedSourceTitles = useMemo(");
+
+    // 触发点是「切回来」：面板收起后卸载，重新打开时挂载即检查一次。
+    expect(app).toContain("useMotionPresence(isDocumentViewerOpen ? true : null, 220)");
+    expect(app).toContain("{documentViewerPresence.value ? (");
+    const checkEffect = section(
+      panel,
+      "每次打开面板（切回来）时检查一次源文件是否被外部改动",
+      "\n  return (\n    <section"
+    );
+    expect(checkEffect).toContain("void checkSourceUpdates();");
+    expect(checkEffect).not.toContain("window.setInterval(");
+    expect(checkEffect).not.toContain("clearInterval");
+    const notice = section(
+      panel,
+      'className="document-viewer-source-notice"',
+      "document-viewer-inline-body"
+    );
+    expect(notice).toContain("describeDocumentSourceUpdate(changedSourceTitles)");
+    expect(notice).toContain("reloadSourceUpdates()");
+    expect(notice).toContain("keepSourceVersions()");
+    expect(panel).toContain("document-tab-outdated");
+    expect(styles).toContain(".document-viewer-source-notice {");
+    expect(styles).toContain(".document-tab-outdated {");
+  });
+
+  it("读取大文件时给出加载特效：面板有专用加载视图，页签上也有读取指示", () => {
+    // 加载中不再复用通用空态，改用面板自己的加载卡片，并点名正在读哪一份。
+    expect(panel).toContain("function DocumentViewerLoading({ title }: { title: string }) {");
+    expect(panel).toContain('className="document-viewer-loading"');
+    expect(panel).toContain('role="status"');
+    expect(panel).toContain("正在读取「{title}」");
+    expect(panel).toContain("<DocumentViewerLoading title={tab.title} />");
+    expect(panel).not.toContain("WorkspaceEmptyState");
+
+    // 页签栏同步给出读取指示，切到别的页签也能看出这份还没读完。
+    expect(panel).toContain("{tab.loading ? (");
+    expect(panel).toContain('className="document-tab-loading"');
+
+    // 样式：转圈、文件名、一条往返扫描的进度轨；减少动效时关掉位移动画。
+    expect(styles).toContain(".document-viewer-loading {");
+    expect(styles).toContain(".document-viewer-loading-track {");
+    expect(styles).toContain("animation: document-viewer-loading-scan 1.25s ease-in-out infinite;");
+    expect(styles).toContain("@keyframes document-viewer-loading-scan {");
+    expect(styles).toContain(".document-tab-loading {");
+    expect(styles).toContain(
+      ".document-viewer-loading-track i,\n  .user-skill-generating-dots i {"
+    );
   });
 });

@@ -2,6 +2,16 @@
 
 记录用户提出并已落地的修改。后续每次完成用户请求后，在本文件追加一条记录。
 
+## 2026-10-13
+
+- 优化长任务期间的终端输出刷新：`terminal.output` 事件按线程暂存并以 100ms 批量提交到运行活动面板，连续同标签输出合并为一条，单条输出限制为 20,000 字符；遇到状态、工具或消息边界事件会先冲刷对应线程，保持活动顺序。新增运行活动批处理与长度上限回归测试。
+
+- 侧栏「查看文档」入口右侧显示已打开的文档数：数量为 0 时不渲染任何徽标，入口保持原样。计数直接取 `useDocumentTabs` 的页签集合（该状态位于 `App`，面板让出聊天区后已打开的文档仍保留），`HistorySidebar` 只新增 `documentViewerOpenCount` 入参、经 `railItemCounts` 映射后由 `renderRailItem` 渲染，不自己持有状态；徽标样式 `.sidebar-nav-count` 追加在 `styles.css` 侧栏入口区块，亮/暗主题各一条。回归测试 `tests/document-viewer-inline-panel.test.ts` 新增「数量透传、为 0 时不渲染、样式类名存在」断言，该文件 23 项通过，完整 `vitest run` 109 个文件 1646 项通过；类型检查仍只剩既有基线报错，本次改动文件未新增报错。
+
+- 「查看文档」的源文件外部改动提醒改为在「切回来」时检查：取消面板打开期间每 4 秒轮询源文件时间戳的做法，删掉 `DOCUMENT_SOURCE_CHECK_INTERVAL_MS` 常量与 `window.setInterval`/`clearInterval`，改为面板每次打开（收起后卸载、切回来重新挂载）时检查一次。命中后仍只在页签条下给一条提醒，由用户选择「重新加载」或「保留当前内容」，不自动覆盖正在编辑的文本。检查函数依赖稳定的 `applyTabs`（依赖为空数组），所以 effect 只在挂载时执行一次，不会随编辑重跑。回归测试同步改为断言「不含定时器与间隔常量」，并守住「面板由 `documentViewerPresence.value` 条件渲染」这一触发点前提——若将来改成常挂载，该断言会失败以防检查点失效；相关用例 24 项通过，完整 `vitest run` 109 个文件 1650 项通过、1 项跳过。
+
+- 「查看文档」补上读取大文件时的加载特效：加载中不再复用通用空态，改为面板自带的加载视图（转圈、点名「正在读取「文件名」」、一条往返扫描的进度轨），页签栏同步在对应页签上显示读取指示，切到别的页签也能看出这份还没读完，因此不再从 `panels` 引入 `WorkspaceEmptyState`。样式新增 `.document-viewer-loading*`、`.document-tab-loading` 与 `document-viewer-loading-scan` 关键帧，并把新动画一并纳入 `prefers-reduced-motion` 降级。回归测试 `tests/document-viewer-inline-panel.test.ts` 新增「加载视图 + 页签指示 + 样式契约」用例，该文件 25 项通过，完整 `vitest run` 109 个文件 1662 项通过、1 项跳过；`apps/desktop` 类型检查未出现本次改动文件的报错。
+
 ## 2026-10-12
 
 - 「查看文档」的两处调整：①空白页另存为的默认文件名由 `.md` 改为 `.txt`，与空白页按纯文本起手保持一致，保存分支与默认名推导（`getUntitledDocumentSuggestedFileName`）不变；②拖入文件改为总是新开页签，`openPaths` 增加 `openDuplicatePaths` 选项，拖入（`openDroppedPaths`）时只在同一批拖入内部去重、不再命中面板里已打开的同路径页签，因此已经有文件打开时再拖入也会各占一个新页签，文件对话框仍按路径去重以避免重复打开同一个文件。回归测试同步更新 `tests/document-viewer-inline-panel.test.ts`（默认名断言改为 `.txt`，新增拖入不去重的三条断言），该文件全部通过，完整 `vitest run` 无回归。

@@ -66,8 +66,10 @@ import {
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldPreserveObservedRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldRefreshSelectedSnapshotForToolEvent,
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
   mergeSnapshotSubagents,
@@ -107,6 +109,7 @@ import {
   TimelineEntry,
   TimelineIncrementalCache,
   buildContextUsage,
+  buildContextUsageHistory,
   buildConversationTurnSections,
   buildPlanTimelineItems,
   buildTimelineEntriesIncremental,
@@ -136,6 +139,7 @@ import {
   getToolActivityKind,
   getToolActivityTarget,
   getToolProcessingLabel,
+  applyAssistantDraftUpdateBatch,
   isAssistantDraftPhase,
   isFileWriteTool,
   isInternalAgentProtocolMessage,
@@ -144,6 +148,7 @@ import {
   isProcessNoteDisplayKind,
   isSubagentWaitTool,
   mergeMessagesAfterOptimisticUserEdit,
+  mergeRuntimeToolCallSummaries,
   mergeRecoveredSnapshotMessages,
   mergeServerMessagesWithNewerLocal,
   mergeSnapshotRecords,
@@ -154,7 +159,6 @@ import {
   reconcileAssistantDraftUpdate,
   isSnapshotReadShort,
   collectMissingSnapshotMessages,
-  collectMissingSnapshotRecords,
   resolveSnapshotRecoveryMessages,
   expectedVisibleMessageIds,
   canEditUserMessage,
@@ -310,6 +314,7 @@ import { TerminalPanel } from "./workspace/terminal-panel";
 import { TerminalWorkspace, type TerminalWorkspaceTab } from "./workspace/terminal-workspace";
 import { useTerminalSessions } from "./hooks/use-terminal-sessions";
 import { useQuickNotes } from "./hooks/use-quick-notes";
+import { useDocumentTabs } from "./hooks/use-document-tabs";
 import { useHistorySearch } from "./hooks/use-history-search";
 import { useChatBackground } from "./hooks/use-chat-background";
 import { useRealtimeEnhancement } from "./hooks/use-realtime-enhancement";
@@ -407,6 +412,12 @@ import {
   type SettingsTab,
 } from "./core/app-types";
 import { RuntimeItemStream, withRuntimeItemDetails, type RuntimeItemStreamEntry } from "./lib/runtime-item-stream";
+import {
+  appendRuntimeOutputBatch,
+  MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS,
+  RUNTIME_ACTIVITY_OUTPUT_BATCH_INTERVAL_MS,
+  type RuntimeActivityOutput
+} from "./core/runtime-activity";
 
 const MAX_RUNTIME_ACTIVITY_ENTRIES = 120;
 
@@ -637,251 +648,7 @@ const SNAPSHOT_SUPERSEDED_RETRY_LIMIT = 3;
  * keeps a pathological server count from turning every refresh into a full read.
  */
 const SNAPSHOT_DELTA_HEAL_LIMIT = 2;
-
-type TranscriptDiagnosticInputs = {
-  threadId: string | null;
-  threadStatus: string | null;
-  isTaskProcessing: boolean;
-  messages: ReadonlyArray<MessageRecord>;
-  entries: ReadonlyArray<{ kind: string; id: string; createdAt: string }>;
-  sections: ReadonlyArray<{
-    id: string;
-    userEntryId: string;
-    summaryEntryId: string | null;
-    entryIds: readonly string[];
-  }>;
-  collapsedTurnIds: ReadonlySet<string>;
-  latestTurnId: string | null;
-};
-
-const transcriptDiagnosticKeys = new Set<string>();
-
-function shortDiagId(value: string | null | undefined): string {
-  return typeof value === "string" ? value.slice(0, 8) : "";
-}
-
-function describeTranscriptMessage(message: MessageRecord) {
-  let displayKind: string | null = null;
-  if (message.metadataJson) {
-    try {
-      displayKind = (JSON.parse(message.metadataJson) as { displayKind?: string }).displayKind ?? null;
-    } catch {
-      displayKind = "PARSE_ERR";
-    }
-  }
-  return {
-    i: shortDiagId(message.id),
-    r: message.role,
-    n: message.content.length,
-    dk: displayKind,
-    tr: shortDiagId(message.turnRunId)
-  };
-}
-
-/**
- * A needle taken from the raw markdown never appears in a text node, because the
- * renderer strips markers like `##` or `**`. Taking the raw prefix therefore
- * reported "not in the DOM" even when the answer was on screen. Take the longest
- * plain-text line instead.
- */
-function extractPlainTextNeedle(signature: string): string {
-  const lines = signature
-    .split(/\r?\n/)
-    .map((line) => line
-      .replace(/^\s*(?:[>#*+\-|]+\s*|\d+[.)]\s*)+/, "")
-      .replace(/[*`_|[\]]/g, "")
-      .trim())
-    .filter((line) => line.length >= 12);
-  const longest = lines.reduce((best, line) => (line.length > best.length ? line : best), "");
-  return longest.slice(0, 16);
-}
-
-function inspectTranscriptDom(signature: string): Record<string, unknown> {
-  const result: Record<string, unknown> = { found: false };
-  try {
-    const scroll = document.querySelector(".chat-scroll") as HTMLElement | null;
-    const cards = Array.from(document.querySelectorAll(".message-card"));
-    result.cards = cards.length;
-    result.cardTexts = cards.map((card) => ({
-      cls: String(card.className ?? "").slice(0, 48),
-      text: (card.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 56)
-    }));
-    if (scroll) {
-      result.scrollTop = Math.round(scroll.scrollTop);
-      result.clientHeight = Math.round(scroll.clientHeight);
-      result.scrollHeight = Math.round(scroll.scrollHeight);
-    }
-    const needle = extractPlainTextNeedle(signature);
-    result.needle = needle;
-    if (!needle) return result;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node = walker.nextNode();
-    let hit: Text | null = null;
-    while (node) {
-      const text = node.nodeValue;
-      if (text && text.includes(needle)) {
-        hit = node as Text;
-        break;
-      }
-      node = walker.nextNode();
-    }
-    if (!hit) return result;
-    result.found = true;
-    const element = hit.parentElement;
-    const card = (element?.closest(".message-card") as HTMLElement | null) ?? element;
-    if (!card) return result;
-    const style = window.getComputedStyle(card);
-    result.opacity = style.opacity;
-    result.visibility = style.visibility;
-    result.display = style.display;
-    result.className = typeof card.className === "string" ? card.className.slice(0, 160) : "";
-    const rect = card.getBoundingClientRect();
-    result.rectTop = Math.round(rect.top);
-    result.rectHeight = Math.round(rect.height);
-    if (scroll) {
-      const scrollRect = scroll.getBoundingClientRect();
-      result.inViewport = rect.bottom > scrollRect.top && rect.top < scrollRect.bottom;
-    }
-  } catch {
-    // Diagnostic only: never affect the app.
-  }
-  return result;
-}
-
-function emitTranscriptDiagnostic(reason: string, delayMs: number, payload: Record<string, unknown>): void {
-  try {
-    console.error(`[transcript-diag] ${JSON.stringify({ reason, delayMs, ...payload })}`);
-  } catch {
-    // Diagnostic only.
-  }
-}
-
-export function scheduleTranscriptDiagnostic(
-  reason: string,
-  threadId: string,
-  messageId: string | null,
-  inputsRef: { current: TranscriptDiagnosticInputs | null }
-): void {
-  const key = `${reason}:${threadId}:${messageId ?? "-"}`;
-  if (transcriptDiagnosticKeys.has(key)) return;
-  if (transcriptDiagnosticKeys.size > 60) transcriptDiagnosticKeys.clear();
-  transcriptDiagnosticKeys.add(key);
-  for (const delayMs of [1400, 5200]) {
-    window.setTimeout(() => {
-      try {
-        const inputs = inputsRef.current;
-        if (!inputs) return;
-        const target = (messageId ? inputs.messages.find((message) => message.id === messageId) : undefined)
-          ?? [...inputs.messages].reverse().find(
-            (message) => message.role === "assistant" && message.content.trim().length > 150
-          );
-        const section = target
-          ? inputs.sections.find((candidate) => candidate.entryIds.some((entryId) => entryId.includes(target.id)))
-          : undefined;
-        const entry = target
-          ? inputs.entries.find((candidate) => candidate.id.includes(target.id))
-          : undefined;
-        emitTranscriptDiagnostic(reason, delayMs, {
-          thread: shortDiagId(threadId),
-          activeThread: shortDiagId(inputs.threadId),
-          status: inputs.threadStatus,
-          processing: inputs.isTaskProcessing,
-          msgCount: inputs.messages.length,
-          entryCount: inputs.entries.length,
-          target: target ? shortDiagId(target.id) : null,
-          targetMessage: target ? describeTranscriptMessage(target) : null,
-          inMessages: Boolean(target),
-          inEntries: Boolean(entry),
-          entryId: entry ? entry.id.slice(0, 24) : null,
-          sectionId: section ? section.id.slice(0, 24) : null,
-          summaryId: section?.summaryEntryId ? section.summaryEntryId.slice(0, 24) : null,
-          summaryIsTarget: Boolean(section?.summaryEntryId && target && section.summaryEntryId.includes(target.id)),
-          sectionEntryCount: section ? section.entryIds.length : null,
-          turnCollapsed: Boolean(section && inputs.collapsedTurnIds.has(section.id)),
-          collapsedCount: inputs.collapsedTurnIds.size,
-          latestTurn: inputs.latestTurnId ? inputs.latestTurnId.slice(0, 16) : null,
-          tailMessages: inputs.messages.slice(-5).map(describeTranscriptMessage),
-          tailEntries: inputs.entries.slice(-6).map((item) => ({
-            k: item.kind,
-            i: item.id.slice(0, 20),
-            c: item.createdAt
-          })),
-          tailSections: inputs.sections.slice(-2).map((item) => ({
-            id: item.id.slice(0, 20),
-            u: item.userEntryId.slice(0, 20),
-            s: item.summaryEntryId ? item.summaryEntryId.slice(0, 20) : null,
-            n: item.entryIds.length
-          })),
-          dom: inspectTranscriptDom(target?.content ?? "")
-        });
-      } catch {
-        // Diagnostic only.
-      }
-    }, delayMs);
-  }
-}
-
-/**
- * A swallowed user message and a send that did nothing look identical on screen,
- * so sample the user's own bubble explicitly: is the optimistic row still pending,
- * did it ever reach the painted set, has a persisted twin arrived, and is the text
- * in the DOM. This is the only signal that separates "never painted" from
- * "painted and then removed".
- */
-export function scheduleUserMessageSendDiagnostic(
-  threadId: string,
-  optimisticId: string,
-  content: string,
-  refs: {
-    inputs: { current: TranscriptDiagnosticInputs | null };
-    live: { current: RuntimeThreadSnapshot | null };
-    pending: { current: Record<string, MessageRecord[]> };
-    rendered: { current: Set<string> };
-  }
-): void {
-  const needle = content.replace(/\s+/g, " ").trim().slice(0, 20);
-  const key = `user.sent:${threadId}:${optimisticId}`;
-  if (transcriptDiagnosticKeys.has(key)) return;
-  if (transcriptDiagnosticKeys.size > 60) transcriptDiagnosticKeys.clear();
-  transcriptDiagnosticKeys.add(key);
-  for (const delayMs of [700, 1400, 5200]) {
-    window.setTimeout(() => {
-      try {
-        const inputs = refs.inputs.current;
-        const live = refs.live.current?.thread.id === threadId ? refs.live.current : null;
-        const twins = (list: ReadonlyArray<MessageRecord>) => list.filter((message) =>
-          message.role === "user"
-          && !message.id.startsWith("optimistic-")
-          && (message.id === optimisticId
-            || (needle.length > 0 && message.content.replace(/\s+/g, " ").trim().slice(0, 20) === needle))
-        );
-        const liveTwins = live ? twins(live.messages) : [];
-        const visibleTwins = inputs ? twins(inputs.messages) : [];
-        emitTranscriptDiagnostic("user.sent", delayMs, {
-          thread: shortDiagId(threadId),
-          activeThread: shortDiagId(inputs?.threadId ?? null),
-          optimisticId: shortDiagId(optimisticId),
-          status: inputs?.threadStatus ?? null,
-          liveCount: live ? live.messages.length : null,
-          msgCount: inputs?.messages.length ?? null,
-          entryCount: inputs?.entries.length ?? null,
-          pendingCount: (refs.pending.current[threadId] ?? []).length,
-          optimisticPending: (refs.pending.current[threadId] ?? []).some((item) => item.id === optimisticId),
-          renderedOptimistic: refs.rendered.current.has(optimisticId),
-          renderedTwin: liveTwins.some((message) => refs.rendered.current.has(message.id)),
-          liveHit: liveTwins.map((message) => shortDiagId(message.id)),
-          visibleHit: visibleTwins.map((message) => shortDiagId(message.id)),
-          entryHit: visibleTwins.map((message) =>
-            inputs?.entries.find((entry) => entry.id.includes(message.id))?.id.slice(0, 24) ?? null
-          ),
-          dom: inspectTranscriptDom(needle)
-        });
-      } catch {
-        // Diagnostic only.
-      }
-    }, delayMs);
-  }
-}
+const ASSISTANT_DRAFT_COMMIT_INTERVAL_MS = 50;
 
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
@@ -953,9 +720,6 @@ export function App() {
   // reported, used to bound the escalation to a full read (see
   // SNAPSHOT_DELTA_HEAL_LIMIT).
   const snapshotDeltaHealCountRef = useRef<Record<string, number>>({});
-  // TEMPORARY diagnostic: latest render's transcript inputs, read by the runtime
-  // event handler (which runs outside React's render pass).
-  const transcriptDiagnosticInputsRef = useRef<TranscriptDiagnosticInputs | null>(null);
   const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
   const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
   /**
@@ -1033,12 +797,25 @@ export function App() {
   const thinkingMemoryRef = useRef<ThinkingMemory | null>(null);
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [assistantDrafts, setAssistantDrafts] = useState<Record<string, AssistantDraft>>({});
+  const assistantDraftsRef = useRef<Record<string, AssistantDraft>>({});
+  const pendingAssistantDraftUpdatesRef = useRef<Record<string, AssistantDraft>>({});
+  const assistantDraftCommitTimerRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    assistantDraftsRef.current = assistantDrafts;
+  }, [assistantDrafts]);
   const [finalizingAssistantMessageIds, setFinalizingAssistantMessageIds] = useState<Set<string>>(() => new Set());
   const finalMessageFadeTimersRef = useRef<Record<string, number>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
   const [composerSubmission, setComposerSubmission] = useState<ComposerSubmission | null>(null);
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
+  const runtimeOutputBufferByThreadRef = useRef<Record<string, RuntimeActivityOutput[]>>({});
+  const runtimeOutputFlushTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (runtimeOutputFlushTimerRef.current !== null) {
+      window.clearTimeout(runtimeOutputFlushTimerRef.current);
+    }
+  }, []);
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [input, setInput] = useState("");
   // 收藏/取消收藏时弹出全局提醒
@@ -1101,15 +878,12 @@ export function App() {
   const [isApiFavoritesOpen, setIsApiFavoritesOpen] = useState(false);
   // 查看文档排在接口卡片下方，同样常驻聊天区，与随手记、接口卡片互斥显示。
   const [isDocumentViewerOpen, setIsDocumentViewerOpen] = useState(false);
-  // 面板把「请求收起」注册到这里，Esc 与侧栏再次点击才能先走未保存确认，而不是直接卸载。
-  const documentViewerCloseRef = useRef<(() => void) | null>(null);
+  // 页签集合挂在 App 而不是面板内部：切去看任务时面板只是让出聊天区，
+  // 面板卸载后已经打开的文档仍留在这一层，再点入口就能接着看。
+  const documentTabs = useDocumentTabs(() => setIsDocumentViewerOpen(false));
+  // Esc 与侧栏再次点击都从这里收面板，未保存的页签仍会先走确认。
   const requestDocumentViewerClose = useStableEvent(() => {
-    const handler = documentViewerCloseRef.current;
-    if (handler) {
-      handler();
-      return;
-    }
-    setIsDocumentViewerOpen(false);
+    documentTabs.requestClosePanel();
   });
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const historySearch = useHistorySearch(showNotice);
@@ -1551,6 +1325,11 @@ export function App() {
   }, []);
 
   useEffect(() => () => {
+    if (assistantDraftCommitTimerRef.current !== null) {
+      window.clearTimeout(assistantDraftCommitTimerRef.current);
+      assistantDraftCommitTimerRef.current = null;
+    }
+    pendingAssistantDraftUpdatesRef.current = {};
     assistantDraftBuffersRef.current = {};
     assistantDraftReasoningBuffersRef.current = {};
     assistantDraftThreadIdsRef.current = {};
@@ -1873,11 +1652,18 @@ export function App() {
         ? mergeSnapshotRecords(snapshotMessages, runtimeMessages, (message) => message.createdAt)
         : snapshotMessages
     );
+    const cachedToolCalls = snapshotCacheByThreadRef.current.get(threadId)?.toolCalls ?? [];
+    const toolCalls = mergeRuntimeToolCallSummaries(nextSnapshot.toolCalls, cachedToolCalls);
     const messageCount = Math.max(nextSnapshot.messageCount, messages.length);
-    if (thread === nextSnapshot.thread && messages === nextSnapshot.messages && messageCount === nextSnapshot.messageCount) {
+    if (
+      thread === nextSnapshot.thread &&
+      messages === nextSnapshot.messages &&
+      toolCalls === nextSnapshot.toolCalls &&
+      messageCount === nextSnapshot.messageCount
+    ) {
       return nextSnapshot;
     }
-    return { ...nextSnapshot, thread, messages, messageCount };
+    return { ...nextSnapshot, thread, messages, toolCalls, messageCount };
   }
 
   function reconcileCachedAndSelectedSnapshot(
@@ -1978,10 +1764,34 @@ export function App() {
       : null;
   const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
 
+  function commitPendingAssistantDraftUpdates() {
+    if (assistantDraftCommitTimerRef.current !== null) {
+      window.clearTimeout(assistantDraftCommitTimerRef.current);
+      assistantDraftCommitTimerRef.current = null;
+    }
+    const pending = pendingAssistantDraftUpdatesRef.current;
+    pendingAssistantDraftUpdatesRef.current = {};
+    if (Object.keys(pending).length === 0) return;
+    setAssistantDrafts((current) => {
+      const next = applyAssistantDraftUpdateBatch(current, Object.values(pending));
+      assistantDraftsRef.current = next;
+      return next;
+    });
+  }
+
+  function scheduleAssistantDraftCommit(draft: AssistantDraft) {
+    pendingAssistantDraftUpdatesRef.current[draft.draftId] = draft;
+    if (assistantDraftCommitTimerRef.current !== null) return;
+    assistantDraftCommitTimerRef.current = window.setTimeout(() => {
+      commitPendingAssistantDraftUpdates();
+    }, ASSISTANT_DRAFT_COMMIT_INTERVAL_MS);
+  }
+
   function flushAssistantDraft(draftId: string) {
     delete assistantDraftBuffersRef.current[draftId];
     delete assistantDraftReasoningBuffersRef.current[draftId];
     delete assistantDraftThreadIdsRef.current[draftId];
+    delete pendingAssistantDraftUpdatesRef.current[draftId];
   }
 
   function discardQueuedAssistantDraft(draftId: string) {
@@ -2078,6 +1888,7 @@ export function App() {
   }, [gpaMenuOpen]);
 
   function startRuntimeActivity(threadId: string) {
+    flushRuntimeOutput(threadId);
     const createdAt = new Date().toISOString();
     setCompletedTurnTimers((current) => {
       if (!current[threadId]) return current;
@@ -2098,6 +1909,7 @@ export function App() {
   }
 
   function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
+    flushRuntimeOutput(threadId);
     // Keep child activity while its root task is selected so subagent cards can
     // distinguish startup, model wait, shell progress, and watchdog outcomes.
     setRuntimeActivities((current) => {
@@ -2118,29 +1930,63 @@ export function App() {
     });
   }
 
+  function flushRuntimeOutput(threadId?: string) {
+    const buffers = runtimeOutputBufferByThreadRef.current;
+    const pendingByThread: Record<string, RuntimeActivityOutput[]> = {};
+    if (threadId) {
+      const pending = buffers[threadId];
+      if (pending?.length) pendingByThread[threadId] = pending;
+      delete buffers[threadId];
+    } else {
+      Object.assign(pendingByThread, buffers);
+      runtimeOutputBufferByThreadRef.current = {};
+    }
+
+    if (Object.keys(runtimeOutputBufferByThreadRef.current).length === 0 && runtimeOutputFlushTimerRef.current !== null) {
+      window.clearTimeout(runtimeOutputFlushTimerRef.current);
+      runtimeOutputFlushTimerRef.current = null;
+    }
+    if (Object.keys(pendingByThread).length === 0) return;
+
+    setRuntimeActivities((current) => {
+      let next = current;
+      for (const [pendingThreadId, outputs] of Object.entries(pendingByThread)) {
+        const activity = appendRuntimeOutputBatch(next[pendingThreadId], pendingThreadId, outputs);
+        if (next === current) next = { ...current };
+        next[pendingThreadId] = {
+          ...activity,
+          entries: trimRuntimeActivityEntries(activity.entries)
+        };
+      }
+      return next;
+    });
+  }
+
   function appendRuntimeOutput(
     threadId: string,
     label: string,
     content: string,
     createdAt = new Date().toISOString()
   ) {
-    setRuntimeActivities((current) => {
-      const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
-      return {
-        ...current,
-        [threadId]: {
-          ...activity,
-          startedAt: activity.startedAt ?? createdAt,
-          entries: trimRuntimeActivityEntries([
-            ...activity.entries,
-            { id: `output-${createdAt}`, kind: "output", label, content, createdAt }
-          ])
-        }
-      };
-    });
+    const buffers = runtimeOutputBufferByThreadRef.current;
+    const pending = buffers[threadId] ?? (buffers[threadId] = []);
+    const boundedContent = content.slice(-MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS);
+    const last = pending.at(-1);
+    if (last?.label === label) {
+      last.content = `${last.content}${boundedContent}`.slice(-MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS);
+    } else {
+      pending.push({ id: `output-${createdAt}`, kind: "output", label, content: boundedContent, createdAt });
+    }
+    if (runtimeOutputFlushTimerRef.current === null) {
+      runtimeOutputFlushTimerRef.current = window.setTimeout(() => {
+        runtimeOutputFlushTimerRef.current = null;
+        flushRuntimeOutput();
+      }, RUNTIME_ACTIVITY_OUTPUT_BATCH_INTERVAL_MS);
+    }
   }
 
   function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
+    flushRuntimeOutput(threadId);
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? {
         threadId,
@@ -2174,6 +2020,7 @@ export function App() {
     resultSize: number,
     hasFullResult: boolean
   ) {
+    flushRuntimeOutput(threadId);
     setRuntimeActivities((current) => {
       const activity = current[threadId];
       if (!activity) return current;
@@ -2191,6 +2038,7 @@ export function App() {
   }
 
   function appendRuntimeDecisionStatusAfterTool(threadId: string, createdAt = new Date().toISOString()) {
+    flushRuntimeOutput(threadId);
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       const completedTools = activity.entries
@@ -2215,6 +2063,7 @@ export function App() {
   }
 
   function clearRuntimeActivity(threadId: string) {
+    flushRuntimeOutput(threadId);
     let captured: RuntimeActivity | undefined;
     setRuntimeActivities((current) => {
       captured = current[threadId];
@@ -2414,6 +2263,7 @@ export function App() {
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
+        const gpaUpdate = typed.payload.gpa;
         if (typed.threadId) {
           const gpaThreadId = typed.threadId;
           // GPA access flags are durable thread preferences. Commit them to
@@ -2422,27 +2272,27 @@ export function App() {
           invalidateSnapshotRequest(gpaThreadId);
           const cached = snapshotCacheByThreadRef.current.get(gpaThreadId);
           if (cached) {
-            cacheThreadSnapshot(replaceThreadSnapshotGpa(cached, gpaThreadId, typed.payload.gpa) ?? cached);
+            cacheThreadSnapshot(replaceThreadSnapshotGpa(cached, gpaThreadId, gpaUpdate) ?? cached);
           }
-          setSnapshot((current) => replaceThreadSnapshotGpa(current, gpaThreadId, typed.payload.gpa));
+          setSnapshot((current) => replaceThreadSnapshotGpa(current, gpaThreadId, gpaUpdate));
         }
         if (typed.threadId === currentSelectedThreadId) {
           if (
             gpaConfirmationPendingStageRef.current &&
-            typed.payload.gpa.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
+            gpaUpdate.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
           ) {
             gpaConfirmationPendingStageRef.current = null;
             setGpaConfirmationSubmitting(false);
           }
           const currentThreadMode = threadsRef.current.find((thread) => thread.id === currentSelectedThreadId)?.mode ?? "project";
-          const gpa = normalizeGpaStateForThread(currentThreadMode, typed.payload.gpa);
+          const gpa = normalizeGpaStateForThread(currentThreadMode, gpaUpdate);
           setGpaState(gpa);
           setGpaComposerSelected(gpa.stage !== "off");
         }
-        if (notificationThreadId && typed.payload.gpa.awaitingConfirmation) {
+        if (notificationThreadId && gpaUpdate.awaitingConfirmation) {
           setThreadNotificationAttention(
             notificationThreadId,
-            typed.payload.gpa.awaitingConfirmation === "goal" ? "需要确认任务目标。" : "需要确认 GPA 计划后继续。",
+            gpaUpdate.awaitingConfirmation === "goal" ? "需要确认任务目标。" : "需要确认 GPA 计划后继续。",
             "gpa",
             undefined,
             typed.createdAt
@@ -2613,6 +2463,15 @@ export function App() {
           typed.threadId,
           (toolCalls) => upsertRuntimeToolCallSummary(toolCalls, startedToolForActivity)
         );
+        if (shouldRefreshSelectedSnapshotForToolEvent(
+          selectedThreadIdRef.current,
+          typed.threadId,
+          snapshotCacheByThreadRef.current.has(typed.threadId),
+          snapshotThreadIdRef.current,
+          Boolean(snapshotRefreshInFlightRef.current[typed.threadId])
+        )) {
+          scheduleRuntimeRefresh(typed.threadId, notificationThreadId);
+        }
         if (typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
             updateThreadNotification(
@@ -2691,6 +2550,15 @@ export function App() {
             hasFullResult,
             completedAt
           }));
+          if (shouldRefreshSelectedSnapshotForToolEvent(
+            selectedThreadIdRef.current,
+            typed.threadId,
+            snapshotCacheByThreadRef.current.has(typed.threadId),
+            snapshotThreadIdRef.current,
+            Boolean(snapshotRefreshInFlightRef.current[typed.threadId])
+          )) {
+            scheduleRuntimeRefresh(typed.threadId, notificationThreadId);
+          }
         }
         if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
@@ -2800,24 +2668,25 @@ export function App() {
         if (reasoningUpdate?.buffer) assistantDraftReasoningBuffersRef.current[draftId] = reasoningUpdate.buffer;
         else if (reasoningUpdate) delete assistantDraftReasoningBuffersRef.current[draftId];
         if (!streamUpdate && !reasoningUpdate) return;
-        setAssistantDrafts((current) => {
-          const previous = current[draftId];
-          const next = {
-            draftId,
-            sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
-            threadId,
-            turnRunId,
-            content: streamUpdate?.content ?? previous?.content ?? "",
-            deltaSequence,
-            reasoning: reasoningUpdate?.reasoning ?? previous?.reasoning,
-            reasoningDeltaSequence,
-            phase,
-            startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
-            completed: false
-          };
-          assistantDraftThreadIdsRef.current[draftId] = threadId;
-          return reconcileAssistantDraftUpdate(current, next);
-        });
+        const previous = pendingAssistantDraftUpdatesRef.current[draftId] ?? assistantDraftsRef.current[draftId];
+        const next = {
+          draftId,
+          sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
+          threadId,
+          turnRunId,
+          content: streamUpdate?.content ?? previous?.content ?? "",
+          deltaSequence,
+          reasoning: reasoningUpdate?.reasoning ?? previous?.reasoning,
+          reasoningDeltaSequence,
+          phase,
+          startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+          completed: false
+        };
+        assistantDraftThreadIdsRef.current[draftId] = threadId;
+        // Draft deltas can arrive many times per frame. Commit at most once per
+        // 50 ms so the entire app is not reconciled for every token while a long
+        // answer is streaming.
+        scheduleAssistantDraftCommit(next);
         // Returning the previous object keeps React from re-rendering on every
         // streamed frame, but the comparison now includes `draftPhase`: otherwise
         // a turn that moves from generating to validating/auditing/retrying keeps
@@ -3076,6 +2945,7 @@ export function App() {
         typed.threadId &&
         (typed.payload?.message?.role === "user" || typed.payload?.message?.role === "assistant")
       ) {
+        flushRuntimeOutput(typed.threadId);
         // A queued user message may be persisted after the optimistic bubble is
         // intentionally omitted. Merge the runtime event immediately; waiting
         // for the next snapshot refresh leaves a blank transcript until reload.
@@ -3111,19 +2981,6 @@ export function App() {
           consumedOptimisticIds,
           commitImmediately
         );
-        emitTranscriptDiagnostic("message.created", 0, {
-          thr: shortDiagId(runtimeThreadId),
-          id: shortDiagId(message.id),
-          role: message.role,
-          n: message.content.length,
-          dk: getMessageDisplayKind(message),
-          commitImmediately,
-          refSize: persistedRuntimeMessagesRef.current[runtimeThreadId]?.size ?? 0,
-          snapLen:
-            snapshotRef.current?.thread.id === runtimeThreadId
-              ? snapshotRef.current.messages.length
-              : null
-        });
       }
       if (
         typed.type === "message.created" &&
@@ -3218,7 +3075,6 @@ export function App() {
         // so it is queued without an optimistic message bubble until restart.
         pendingRuntimeStartsRef.current.delete(runtimeThreadId);
         if (status !== "running" && status !== "waiting") {
-          scheduleTranscriptDiagnostic("thread.terminal", runtimeThreadId, null, transcriptDiagnosticInputsRef);
           discardQueuedAssistantDraftsForThread(runtimeThreadId);
           setAssistantDrafts((current) => {
             const remaining = Object.entries(current).filter(([, entry]) =>
@@ -3243,6 +3099,9 @@ export function App() {
         }
       }
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
+        // Do not let the final streamed text sit in the batching queue after
+        // its completion event; completion/reconciliation must follow it.
+        commitPendingAssistantDraftUpdates();
         const { turnRunId, draftId, messageId, discarded } = typed.payload;
         const suppressed = !!typed.threadId && suppressRuntimeProgressRef.current[typed.threadId];
         if (typeof draftId === "string") {
@@ -3259,14 +3118,6 @@ export function App() {
           discarded: discarded === true,
           suppressed
         }));
-        if (discarded !== true && typeof messageId === "string" && typed.threadId) {
-          scheduleTranscriptDiagnostic(
-            "assistant.completed",
-            typed.threadId,
-            messageId,
-            transcriptDiagnosticInputsRef
-          );
-        }
       }
       if (typed.type === "turn.usage" && typed.threadId) {
         if (currentSelectedThreadId && notificationThreadId === currentSelectedThreadId) {
@@ -3866,22 +3717,6 @@ export function App() {
       };
     });
   }, [snapshotThreadKey, selectedMessages]);
-  // TEMPORARY diagnostic: log every change in the transcript's shape so a commit
-  // that drops rows is visible in the runtime log.
-  const transcriptShapeDiagRef = useRef<string>("");
-  useLayoutEffect(() => {
-    const shape = `${snapshotThreadKey ?? "-"}:${selectedMessages.length}:${visibleMessages.length}`;
-    if (transcriptShapeDiagRef.current === shape) return;
-    transcriptShapeDiagRef.current = shape;
-    emitTranscriptDiagnostic("transcript.shape", 0, {
-      thread: shortDiagId(snapshotThreadKey),
-      stateCount: selectedMessages.length,
-      cacheCount: snapshotCacheByThreadRef.current.get(snapshotThreadKey ?? "")?.messages.length ?? -1,
-      visibleCount: visibleMessages.length,
-      optimisticCount: selectedMessages.filter((message) => message.id.startsWith("optimistic-")).length,
-      tail: selectedMessages.slice(-4).map((message) => `${shortDiagId(message.id)}:${message.role}`)
-    });
-  }, [selectedMessages, snapshotThreadKey, visibleMessages]);
   const gpaPlanMessageId = useMemo(
     () => getGpaPlanMessageId(visibleMessages, gpaState),
     [gpaState, visibleMessages]
@@ -3992,7 +3827,11 @@ export function App() {
       );
   }, [currentTaskTurnRunId, snapshotWorkspaceRoot, snapshot?.toolCalls]);
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
-  const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+  const isTaskProcessing = shouldShowTaskProcessing(
+    selectedThreadStatus,
+    isPreparingRuntime,
+    Boolean(localRuntimeProgress?.runtimeObserved)
+  );
 
   // Reasoning used to stream at the tail of the chat transcript, where every frame
   // changed the conversation height and made the whole chat jump up and down. It now
@@ -4155,16 +3994,6 @@ export function App() {
   }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn?.id]);
   // TEMPORARY diagnostic: expose this render's transcript inputs to the runtime
   // event handler through a ref.
-  transcriptDiagnosticInputsRef.current = {
-    threadId: activeSnapshotThreadId,
-    threadStatus: activeSnapshotThreadStatus,
-    isTaskProcessing,
-    messages: visibleMessages,
-    entries: timelineEntries,
-    sections: conversationTurnSections,
-    collapsedTurnIds,
-    latestTurnId: latestConversationTurn?.id ?? null
-  };
   const latestRootRuntimeTool = useMemo(
     () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
       (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
@@ -4508,6 +4337,15 @@ export function App() {
     return targetModel.displayName?.trim() || targetModel.id;
   }, [config, composerModelId, composerProviderId, selectedThread]);
   const activeContextCompaction = snapshot?.contextCompaction ?? null;
+  const contextUsageHistory = useMemo(() => buildContextUsageHistory(
+    selectedMessages,
+    snapshot?.toolCalls ?? [],
+    activeContextCompaction
+  ), [activeContextCompaction, selectedMessages, snapshot?.toolCalls]);
+  const formattedComposerAttachments = useMemo(
+    () => formatComposerAttachments(composerAttachments),
+    [composerAttachments]
+  );
   const contextUsage = useMemo(() => {
     const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config?.defaultProvider;
     const targetModelId = selectedThread?.modelId ?? composerModelId ?? config?.defaultModel;
@@ -4525,11 +4363,12 @@ export function App() {
       gpaStage: gpaState.stage,
       selectedSkillCount: selectedThread?.selectedSkillIds.length ?? 0,
       mcpServerCount: config?.mcpServers.length ?? 0,
-      pendingInput: `${input}\n${formatComposerAttachments(composerAttachments)}`,
+      pendingInput: `${input}\n${formattedComposerAttachments}`,
+      history: contextUsageHistory,
       compaction: activeContextCompaction,
       measurement: matchingMeasurement
     });
-  }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.contextMeasurement, snapshot?.toolCalls]);
+  }, [activeContextCompaction, composerModelId, composerProviderId, config, contextUsageHistory, formattedComposerAttachments, gpaState.stage, input, selectedThread, snapshot?.contextMeasurement]);
 
   // Timestamp of the previous follow frame and of the last follow request. The pair lets
   // the loop derive a per-frame delta (so speed is time-based, not frame-based) and decide
@@ -5092,7 +4931,7 @@ export function App() {
       // calls across both delta and full reads: a partial/stale full response must
       // not make completed tools disappear until the next reload.
       const toolCalls = base
-        ? mergeSnapshotRecords(base.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
+        ? mergeRuntimeToolCallSummaries(base.toolCalls, next.toolCalls)
         : next.toolCalls;
       const artifacts = next.snapshotMode === "delta" && base
         ? mergeSnapshotRecords(base.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
@@ -5172,6 +5011,14 @@ export function App() {
             if (!current || current.thread.id !== threadId) return reconciled;
             return {
               ...reconciled,
+            // A tool event can land after this read passed its request-id check
+            // but before React replays this transition updater. Preserve the
+            // live/cache state so the captured snapshot cannot roll it back.
+            toolCalls: mergeRuntimeToolCallSummaries(
+              reconciled.toolCalls,
+              current.toolCalls,
+              snapshotCacheByThreadRef.current.get(threadId)?.toolCalls ?? []
+            ),
               messages: mergeMessagesAfterOptimisticUserEdit(
                 current.messages,
                 reconciled.messages,
@@ -5224,10 +5071,7 @@ export function App() {
                 if (!current || current.thread.id !== threadId) return current;
                 const missingMessages = collectMissingSnapshotMessages(current.messages, expected.messages);
                 const messages = mergeRecoveredSnapshotMessages(current.messages, missingMessages);
-                const missingToolCalls = collectMissingSnapshotRecords(current.toolCalls, expected.toolCalls);
-                const toolCalls = missingToolCalls.length > 0
-                  ? mergeSnapshotRecords(current.toolCalls, missingToolCalls, (toolCall) => toolCall.startedAt)
-                  : current.toolCalls;
+                const toolCalls = mergeRuntimeToolCallSummaries(current.toolCalls, expected.toolCalls);
                 if (messages === current.messages && toolCalls === current.toolCalls) return current;
                 return {
                   ...current,
@@ -5240,16 +5084,6 @@ export function App() {
           }, 1_200);
         }
       }
-      emitTranscriptDiagnostic("snapshot.applied", 0, {
-        thr: shortDiagId(threadId),
-        mode: next.snapshotMode,
-        serverCount: next.messageCount,
-        got: next.messages.length,
-        localCount: localMessages.length,
-        finalCount: mergedSnapshot.messages.length,
-        hasNewMessages,
-        reachedTerminalState
-      });
       setThreads((current) => current.map((thread) =>
         thread.id === mergedSnapshot.thread.id
           ? resolveLatestThreadRecord(thread, mergedSnapshot.thread)
@@ -5260,16 +5094,24 @@ export function App() {
         // Snapshot refresh can win a race where the queue already drained but the
         // thread has not flipped to running yet. Keep the local preparing
         // heartbeat so the chat does not go blank after send.
-        let preserveLocalPreparing = false;
+        let preserveLocalRuntime = false;
         setRuntimeProgress((current) => {
           if (current?.threadId !== threadId) return current;
+          if (shouldPreserveObservedRuntime(
+            mergedSnapshot.thread.status,
+            current.runtimeObserved,
+            Boolean(suppressRuntimeProgressRef.current[threadId])
+          )) {
+            preserveLocalRuntime = true;
+            return current;
+          }
           if (!current.runtimeObserved) {
-            preserveLocalPreparing = shouldPreservePreparingRuntime(
+            preserveLocalRuntime = shouldPreservePreparingRuntime(
               mergedSnapshot.thread.status,
               next.queuedMessages.length,
               false
             );
-            return preserveLocalPreparing ? current : null;
+            return preserveLocalRuntime ? current : null;
           }
           return shouldPreservePreparingRuntime(
             mergedSnapshot.thread.status,
@@ -5277,7 +5119,7 @@ export function App() {
             current.runtimeObserved
           ) ? current : null;
         });
-        if (!preserveLocalPreparing) {
+        if (!preserveLocalRuntime) {
           // A refresh can observe completion before its final runtime event reaches
           // the renderer. Do not let an old activity record keep the thinking UI alive.
           clearRuntimeActivity(threadId);
@@ -5789,7 +5631,8 @@ export function App() {
       }
       setThreads(nextThreads);
       setProjectEditDraft(null);
-      await refreshThreads({ fallbackToFirst: false });
+      // 当前会话快照由下面的 refreshSnapshot 定向刷新，避免这里再整体重载一次。
+      await refreshThreads({ refreshSelectedSnapshot: false, fallbackToFirst: false });
       if (selectedThreadId && group.some((thread) => thread.id === selectedThreadId)) await refreshSnapshot(selectedThreadId);
       showNotice("项目源文件夹已更新。", { tone: "success" });
     } catch (error) {
@@ -6148,14 +5991,6 @@ export function App() {
     const optimisticMessage = !options?.internal && !queueingBehindActiveTask
       ? appendOptimisticUserMessage(threadId, displayContent)
       : null;
-    if (optimisticMessage) {
-      scheduleUserMessageSendDiagnostic(threadId, optimisticMessage.id, displayContent, {
-        inputs: transcriptDiagnosticInputsRef,
-        live: snapshotRef,
-        pending: pendingUserMessagesRef,
-        rendered: renderedTranscriptMessageIdsRef
-      });
-    }
     // Start the under-message heartbeat immediately so send never looks like a
     // silent no-op while attachments/skills/runtime wake are still in flight.
     if (!options?.internal && !queueingBehindActiveTask) {
@@ -7849,6 +7684,7 @@ export function App() {
         apiFavoritesActive={isApiFavoritesOpen}
         onOpenDocumentViewer={openDocumentViewerEvent}
         documentViewerActive={isDocumentViewerOpen}
+        documentViewerOpenCount={documentTabs.tabs.length}
         hiddenSidebarItems={config?.desktop.hiddenSidebarItems}
         onOpenSearch={openHistorySearchEvent}
         onOpenSettings={openSettingsEvent}
@@ -8007,10 +7843,7 @@ export function App() {
           {documentViewerPresence.value ? (
             <DocumentViewerPanel
               motionPhase={documentViewerPresence.phase}
-              onClose={() => setIsDocumentViewerOpen(false)}
-              onRegisterCloseRequest={(handler) => {
-                documentViewerCloseRef.current = handler;
-              }}
+              documents={documentTabs}
             />
           ) : null}
           <div

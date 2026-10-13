@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   buildConversationTurnSections,
+  getDefaultCollapsedConversationTurnIds,
   buildTimelineEntries,
   shouldKeepTimelineEntryWhenTurnCollapsed
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
+import { shouldShowTaskProcessing } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import { mergeToolCallResults } from "../apps/desktop/src/renderer/timeline/tool-activity-state";
 import type { MessageRecord, ToolCallRecord } from "../packages/shared-types/src";
 
@@ -40,6 +42,18 @@ describe("tool activity visibility", () => {
     expect(toolGroup?.kind).toBe("tool-group");
     expect(turn).toBeDefined();
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, turn, new Set())).toBe(true);
+  });
+
+  it("keeps a tool group visible when a runtime tool event beats an idle snapshot", () => {
+    const isProcessing = shouldShowTaskProcessing("idle", false, true);
+    const entries = buildTimelineEntries([userMessage], [toolCall], [], undefined, "idle");
+    const toolGroup = entries.find((entry) => entry.kind === "tool-group");
+    const sections = buildConversationTurnSections(entries);
+    const collapsed = new Set(getDefaultCollapsedConversationTurnIds(sections, sections.at(-1)?.id ?? null, isProcessing));
+
+    expect(isProcessing).toBe(true);
+    expect(toolGroup?.kind).toBe("tool-group");
+    expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, sections[0], collapsed)).toBe(true);
   });
 
   it("folds tool groups away with the turn once it is collapsed", () => {

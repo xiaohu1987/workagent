@@ -55,6 +55,21 @@ export type ContextUsage = {
   toolCount?: number;
 };
 
+/**
+ * The immutable conversation portion of the context estimate.
+ *
+ * The composer changes on every keystroke, while messages and tool arguments
+ * usually stay fixed. Keeping these character counts alongside a memoized
+ * history lets the composer estimate only its pending input instead of
+ * rebuilding and scanning the entire conversation for every keypress.
+ */
+export type ContextUsageHistory = {
+  codePoints: number;
+  leadingTrimmedCodePoints: number;
+  trailingTrimmedCodePoints: number;
+  hasContent: boolean;
+};
+
 export function composerAttachmentKey(attachment: ComposerAttachment | ComposerAttachmentInput): string {
   switch (attachment.kind) {
     case "code":
@@ -213,6 +228,7 @@ export function buildContextUsage(input: {
   selectedSkillCount: number;
   mcpServerCount: number;
   pendingInput: string;
+  history?: ContextUsageHistory;
   compaction?: ContextCompactionRecord | null;
   measurement?: ContextMeasurementRecord | null;
 }): ContextUsage {
@@ -249,23 +265,10 @@ export function buildContextUsage(input: {
       toolCount: input.measurement.toolCount
     };
   }
-  const compactedAt = input.compaction ? Date.parse(input.compaction.createdAt) : Number.NaN;
-  const conversationText = input.compaction
-    ? [
-        ...input.messages
-          .filter((message) => Date.parse(message.createdAt) > compactedAt)
-          .map((message) => message.content),
-        ...input.toolCalls
-          .filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > compactedAt)
-          .map((toolCall) => toolCall.argumentsJson),
-        input.pendingInput
-      ].join("\n")
-    : [
-        ...input.messages.map((message) => message.content),
-        ...input.toolCalls.map((toolCall) => toolCall.argumentsJson),
-        input.pendingInput
-      ].join("\n");
-  const recentTokens = Math.max(0, estimateContextTokens(conversationText));
+  const recentTokens = Math.max(0, input.history
+    ? estimateContextTokensWithPending(input.history, input.pendingInput)
+    : estimateContextTokens(buildContextUsageHistoryText(input.messages, input.toolCalls, input.compaction) +
+        `\n${input.pendingInput}`));
   const conversationTokens = input.compaction
     ? Math.max(1, input.compaction.afterTokens) + recentTokens
     : Math.max(1, recentTokens);
@@ -287,6 +290,68 @@ export function buildContextUsage(input: {
     compaction: input.compaction ?? null,
     measurement: null
   };
+}
+
+/** Build the static part of the fallback context estimate when its inputs change. */
+export function buildContextUsageHistory(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[],
+  compaction?: ContextCompactionRecord | null
+): ContextUsageHistory {
+  const text = buildContextUsageHistoryText(messages, toolCalls, compaction);
+  const codePoints = countCodePoints(text);
+  const leadingTrimmedCodePoints = countCodePoints(text) - countCodePoints(text.trimStart());
+  const trailingTrimmedCodePoints = countCodePoints(text) - countCodePoints(text.trimEnd());
+  return {
+    codePoints,
+    leadingTrimmedCodePoints,
+    trailingTrimmedCodePoints,
+    hasContent: text.trim().length > 0
+  };
+}
+
+function buildContextUsageHistoryText(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[],
+  compaction?: ContextCompactionRecord | null
+): string {
+  const compactedAt = compaction ? Date.parse(compaction.createdAt) : Number.NaN;
+  const messageContents = compaction
+    ? messages
+        .filter((message) => Date.parse(message.createdAt) > compactedAt)
+        .map((message) => message.content)
+    : messages.map((message) => message.content);
+  const toolArguments = compaction
+    ? toolCalls
+        .filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > compactedAt)
+        .map((toolCall) => toolCall.argumentsJson)
+    : toolCalls.map((toolCall) => toolCall.argumentsJson);
+  return [...messageContents, ...toolArguments].join("\n");
+}
+
+/** Match `[history, pendingInput].join("\n").trim()` without rescanning history. */
+export function estimateContextTokensWithPending(history: ContextUsageHistory, pendingInput: string): number {
+  const pendingCodePoints = countCodePoints(pendingInput);
+  const pendingLeadingTrimmedCodePoints = pendingCodePoints - countCodePoints(pendingInput.trimStart());
+  const pendingTrailingTrimmedCodePoints = pendingCodePoints - countCodePoints(pendingInput.trimEnd());
+  const pendingHasContent = pendingInput.trim().length > 0;
+  const combinedCodePoints = history.codePoints + 1 + pendingCodePoints;
+  const leadingTrimmedCodePoints = history.hasContent
+    ? history.leadingTrimmedCodePoints
+    : history.codePoints + 1 + pendingLeadingTrimmedCodePoints;
+  const trailingTrimmedCodePoints = pendingHasContent
+    ? pendingTrailingTrimmedCodePoints
+    : pendingCodePoints + 1 + history.trailingTrimmedCodePoints;
+  const normalizedCodePoints = Math.max(0, combinedCodePoints - leadingTrimmedCodePoints - trailingTrimmedCodePoints);
+  // When both portions are whitespace-only, their trimmed regions overlap.
+  // The maximum above makes the concatenated result's normalized length zero.
+  return Math.ceil(normalizedCodePoints / 2.8);
+}
+
+function countCodePoints(value: string): number {
+  let count = 0;
+  for (const _character of value) count += 1;
+  return count;
 }
 
 export function estimateContextTokens(value: string): number {
@@ -1584,6 +1649,54 @@ export function upsertRuntimeToolCallSummary(
   return mergeSnapshotRecords(toolCalls, [toolCall], (item) => item.startedAt);
 }
 
+function toolCallStatusRank(status: ToolCallSummary["status"]): number {
+  if (status === "pending") return 0;
+  if (status === "running") return 1;
+  return 2;
+}
+
+function shouldKeepExistingToolCall(existing: ToolCallSummary, incoming: ToolCallSummary): boolean {
+  const existingRank = toolCallStatusRank(existing.status);
+  const incomingRank = toolCallStatusRank(incoming.status);
+  if (existingRank !== incomingRank) return existingRank > incomingRank;
+
+  if (existingRank === 2) {
+    if (existing.completedAt && !incoming.completedAt) return true;
+    if (!existing.completedAt || !incoming.completedAt) return false;
+    return existing.completedAt > incoming.completedAt;
+  }
+  return false;
+}
+
+/**
+ * Merge tool summaries from snapshots and runtime events without allowing an
+ * older running row to replace a completed runtime update for the same call.
+ */
+export function mergeRuntimeToolCallSummaries(
+  ...sources: ReadonlyArray<ReadonlyArray<ToolCallSummary>>
+): ToolCallSummary[] {
+  const first = sources[0] ?? [];
+  const mergedById = new Map<string, ToolCallSummary>();
+  for (const source of sources) {
+    for (const incoming of source) {
+      const existing = mergedById.get(incoming.id);
+      if (!existing || !shouldKeepExistingToolCall(existing, incoming)) {
+        mergedById.set(incoming.id, incoming);
+      }
+    }
+  }
+  const merged = [...mergedById.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+  if (first.length === merged.length && first.every((toolCall, index) => {
+    const mergedToolCall = merged[index];
+    const keys = Object.keys(toolCall) as Array<keyof ToolCallSummary>;
+    return keys.length === Object.keys(mergedToolCall).length &&
+      keys.every((key) => toolCall[key] === mergedToolCall[key]);
+  })) {
+    return first as ToolCallSummary[];
+  }
+  return merged;
+}
+
 export type RuntimeToolCallCompletion = Omit<Pick<
   ToolCallSummary,
   "id" | "threadId" | "status" | "resultJson" | "resultSize" | "hasFullResult" | "completedAt"
@@ -2471,6 +2584,14 @@ export function reconcileAssistantDraftUpdate(
   );
   next[draft.draftId] = { ...existing, ...draft, completed: false };
   return next;
+}
+
+/** Apply only the latest queued update per draft after the renderer batch window. */
+export function applyAssistantDraftUpdateBatch(
+  current: Record<string, AssistantDraft>,
+  updates: ReadonlyArray<AssistantDraft>
+): Record<string, AssistantDraft> {
+  return updates.reduce(reconcileAssistantDraftUpdate, current);
 }
 
 export function shouldKeepAssistantDraft(

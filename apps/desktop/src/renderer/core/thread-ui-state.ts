@@ -172,6 +172,23 @@ export function shouldRefreshSelectedSnapshotForRuntimeEvent(
   );
 }
 
+/** A tool event needs a follow-up read when the selected transcript has no base to patch. */
+export function shouldRefreshSelectedSnapshotForToolEvent(
+  selectedThreadId: string | null,
+  eventThreadId: string | undefined,
+  hasCachedSnapshot: boolean,
+  snapshotThreadId: string | null,
+  hasRefreshInFlight: boolean
+): boolean {
+  return Boolean(
+    selectedThreadId &&
+    eventThreadId === selectedThreadId &&
+    !hasCachedSnapshot &&
+    snapshotThreadId !== selectedThreadId &&
+    !hasRefreshInFlight
+  );
+}
+
 /** Child-status echoes must not abort an in-flight parent snapshot refresh. */
 export function shouldInvalidateSnapshotForThreadUpdate(payload: {
   childThread?: ThreadRecord | null;
@@ -341,9 +358,19 @@ export function shouldPreservePreparingRuntime(
   return !isThreadExecutionInProgress(status) && queuedMessageCount > 0 && !runtimeObserved;
 }
 
+/** Keep a runtime event as evidence of an active turn until its status event arrives. */
+export function shouldPreserveObservedRuntime(
+  status: ThreadRecord["status"] | null | undefined,
+  runtimeObserved: boolean,
+  suppressed: boolean
+): boolean {
+  return status === "idle" && runtimeObserved && !suppressed;
+}
+
 export function shouldShowTaskProcessing(
   status: ThreadRecord["status"] | null | undefined,
-  isPreparing: boolean
+  isPreparing: boolean,
+  runtimeObserved = false
 ): boolean {
   if (isThreadExecutionInProgress(status)) {
     return true;
@@ -351,9 +378,11 @@ export function shouldShowTaskProcessing(
   if (status === "completed" || status === "failed") {
     return false;
   }
-  // Allow the brief preparing overlay before the backend flips to running.
-  // Never keep "执行中" alive from stale runtimeProgress after stop/complete.
-  return isPreparing;
+  // A runtime event can arrive before its thread.updated snapshot. Treat that
+  // observed work as active while the snapshot is still idle/unknown; otherwise
+  // the latest turn can collapse and hide its tool groups during the handoff.
+  // Explicit terminal status still wins over stale runtime progress.
+  return isPreparing || runtimeObserved;
 }
 
 export function getHistoryItemAffordance(status?: ThreadRecord["status"] | null): HistoryItemAffordance {

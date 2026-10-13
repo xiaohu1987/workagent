@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent,
 import { IconClose, IconFile, IconPlus, IconSpinner } from "../icons";
 import { renderMarkdownDocument } from "../markdown";
 import { getFilePreviewLanguage, highlightFilePreview } from "./file-preview-utils";
-import { WorkspaceEmptyState } from "./panels";
 import {
   countDocumentLines,
   getDocumentIndentSize,
@@ -14,6 +13,7 @@ import {
 } from "./document-editing";
 import {
   DOCUMENT_CHOOSE_EXTENSIONS,
+  describeDocumentSourceUpdate,
   getDocumentViewKindLabel,
   getDocumentViewModeLabel,
   getDocumentViewModes,
@@ -21,13 +21,12 @@ import {
   type DocumentViewKind,
   type DocumentViewMode
 } from "./document-viewer-utils";
-import { useDocumentTabs, type DocumentTab } from "../hooks/use-document-tabs";
+import { type DocumentTab, type DocumentTabsController } from "../hooks/use-document-tabs";
 
 type DocumentViewerPanelProps = {
   motionPhase: string;
-  onClose: () => void;
-  /** 把「请求收起」的能力交给上层，让 Esc 与侧栏再次点击也走未保存确认。 */
-  onRegisterCloseRequest?: (handler: (() => void) | null) => void;
+  /** 页签集合由 App 持有：切换任务收起面板时，已经打开的文档不会随面板卸载丢掉。 */
+  documents: DocumentTabsController;
 };
 
 /** 超过这个体积就不再逐键做语法高亮，避免大文件编辑时输入延迟。 */
@@ -44,20 +43,23 @@ const DOCUMENT_EMPTY_BADGES = ["Markdown", "HTML", "C#", "SQL", "JSON", "纯文�
  * 支持一次打开多个文件形成页签，Markdown/HTML 可在预览与源码之间切换，
  * 代码与文本按后缀名高亮并允许直接编辑后保存。
  */
-export function DocumentViewerPanel({ motionPhase, onClose, onRegisterCloseRequest }: DocumentViewerPanelProps) {
-  const documents = useDocumentTabs(onClose);
-  const { tabs, activeTab, activeTabId, pendingAction, picking, dirtyCount, requestClosePanel } = documents;
+export function DocumentViewerPanel({ motionPhase, documents }: DocumentViewerPanelProps) {
+  const {
+    tabs,
+    activeTab,
+    activeTabId,
+    pendingAction,
+    picking,
+    dirtyCount,
+    changedSourceTitles,
+    checkSourceUpdates,
+    reloadSourceUpdates,
+    keepSourceVersions,
+    requestClosePanel
+  } = documents;
   const [dropActive, setDropActive] = useState(false);
   const [dropNotice, setDropNotice] = useState<string | null>(null);
   const dropDepthRef = useRef(0);
-
-  useEffect(() => {
-    if (!onRegisterCloseRequest) {
-      return;
-    }
-    onRegisterCloseRequest(requestClosePanel);
-    return () => onRegisterCloseRequest(null);
-  }, [onRegisterCloseRequest, requestClosePanel]);
 
   /** 只接管文件拖拽：拖文字或链接时保持原生行为，不弹落点提示。 */
   function isFileDrag(event: ReactDragEvent<HTMLElement>): boolean {
@@ -117,6 +119,15 @@ export function DocumentViewerPanel({ motionPhase, onClose, onRegisterCloseReque
       void documents.openDroppedPaths(supported);
     }
   }
+
+  /**
+   * 每次打开面板（切回来）时检查一次源文件是否被外部改动：命中只在页签条下给一条提醒，
+   * 要不要用磁盘上的版本覆盖当前内容由用户决定，不自动替换正在编辑的文本。
+   * 不做后台轮询：面板收起后卸载，切回来重新挂载正好是这次检查的触发点。
+   */
+  useEffect(() => {
+    void checkSourceUpdates();
+  }, [checkSourceUpdates]);
 
   return (
     <section
@@ -184,6 +195,29 @@ export function DocumentViewerPanel({ motionPhase, onClose, onRegisterCloseReque
           onSelect={documents.selectTab}
           onCloseTab={documents.requestCloseTab}
         />
+      ) : null}
+      {changedSourceTitles.length > 0 ? (
+        <div className="document-viewer-source-notice" role="status">
+          <span className="document-viewer-source-notice-message">
+            {describeDocumentSourceUpdate(changedSourceTitles)}，要用磁盘上的版本重新加载吗？
+          </span>
+          <div className="document-viewer-source-notice-actions">
+            <button
+              className="document-viewer-source-notice-button"
+              type="button"
+              onClick={() => void reloadSourceUpdates()}
+            >
+              重新加载
+            </button>
+            <button
+              className="document-viewer-source-notice-button"
+              type="button"
+              onClick={() => void keepSourceVersions()}
+            >
+              保留当前内容
+            </button>
+          </div>
+        </div>
       ) : null}
       <div className="document-viewer-inline-body">
         <DocumentViewerContent
@@ -269,6 +303,18 @@ function DocumentTabStrip({ tabs, activeTabId, onSelect, onCloseTab }: DocumentT
               onClick={() => onSelect(tab.id)}
             >
               <span className="document-tab-name">{tab.title}</span>
+              {tab.sourceChanged ? (
+                <span
+                  className="document-tab-outdated"
+                  title="磁盘上的源文件已更新"
+                  aria-label="磁盘上的源文件已更新"
+                />
+              ) : null}
+              {tab.loading ? (
+                <span className="document-tab-loading" title="读取中" aria-label="读取中">
+                  <IconSpinner />
+                </span>
+              ) : null}
               {dirty ? <span className="document-tab-dirty" aria-label="未保存">●</span> : null}
             </button>
             <button
@@ -304,7 +350,7 @@ function DocumentViewerContent({ tab, picking, onOpen, onChange, onSave, onSaveA
     return <div className="project-preview-note project-preview-note-error">打开失败：{tab.error}</div>;
   }
   if (tab.loading) {
-    return <WorkspaceEmptyState icon={<IconSpinner />} title="读取中" message="正在读取文件..." />;
+    return <DocumentViewerLoading title={tab.title} />;
   }
   if (tab.binary) {
     return <div className="project-preview-note">二进制文件无法直接预览或编辑。</div>;
@@ -334,6 +380,25 @@ function DocumentViewerContent({ tab, picking, onOpen, onChange, onSave, onSaveA
       onSave={() => onSave(tab.id)}
       onSaveAs={() => onSaveAs(tab.id)}
     />
+  );
+}
+
+/**
+ * 读取文件时的加载态：转圈、点名正在读哪一份、再给一条往返扫描的进度轨。
+ * 大文件从磁盘到界面这段等待没有任何中间状态，这张卡片负责让等待一直可见。
+ */
+function DocumentViewerLoading({ title }: { title: string }) {
+  return (
+    <div className="document-viewer-loading" role="status" aria-live="polite">
+      <span className="document-viewer-loading-icon" aria-hidden="true">
+        <IconSpinner />
+      </span>
+      <strong className="document-viewer-loading-title">正在读取「{title}」</strong>
+      <p className="document-viewer-loading-copy">文件较大时需要多等一会儿，读完会自动显示内容。</p>
+      <span className="document-viewer-loading-track" aria-hidden="true">
+        <i />
+      </span>
+    </div>
   );
 }
 

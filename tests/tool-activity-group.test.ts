@@ -38,7 +38,7 @@ describe("ToolActivityGroup", () => {
     expect(html).not.toContain("tool-activity-row compact");
   });
 
-  it("keeps a running tool group collapsed until the user expands it", () => {
+  it("keeps a historical running tool group collapsed until the user expands it", () => {
     const runningCall: ToolCallRecord = {
       id: "tool-running",
       threadId: "thread-1",
@@ -60,7 +60,30 @@ describe("ToolActivityGroup", () => {
     expect(html).not.toContain("tool-activity-row compact");
   });
 
-  it("does not auto-expand tool group details at runtime", () => {
+  it("keeps the active turn group collapsed by default", () => {
+    const runningCall: ToolCallRecord = {
+      id: "tool-active",
+      threadId: "thread-1",
+      turnRunId: "turn-1",
+      toolName: "shell.exec",
+      argumentsJson: JSON.stringify({ command: "build" }),
+      resultJson: null,
+      status: "completed",
+      riskLevel: "low",
+      approvalMode: "auto",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      completedAt: "2026-08-14T00:00:01.000Z"
+    };
+
+    const html = renderToStaticMarkup(createElement(ToolActivityGroup, { toolCalls: [runningCall] }));
+
+    expect(html).toContain('class="tool-activity-group"');
+    expect(html).not.toContain('class="tool-activity-group" open');
+    expect(html).not.toContain("tool-activity-details-shell");
+    expect(html).not.toContain("tool-activity-row compact");
+  });
+
+  it("keeps the default closed in the component update path", () => {
     const transcriptSource = readFileSync(new URL("../apps/desktop/src/renderer/timeline/transcript.tsx", import.meta.url), "utf8");
 
     expect(transcriptSource).toContain("const [isOpen, setIsOpen] = useState(false);");

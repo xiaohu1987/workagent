@@ -86,3 +86,26 @@ export function getNextUntitledDocumentTitle(takenTitles: string[]): string {
 export function getUntitledDocumentSuggestedFileName(title: string): string {
   return `${title}.txt`;
 }
+
+/** 时间戳容差：不同文件系统给的 mtime 粒度不同，1ms 以内视为同一次写入。 */
+const DOCUMENT_SOURCE_MTIME_TOLERANCE_MS = 1;
+
+/**
+ * 磁盘上的源文件是否已经和打开时的基线不同。
+ * 任一侧拿不到时间戳（文件已删除、读不到权限）都按「无法判断」返回 false，
+ * 不把读不到的情况也报成一次更新提醒。
+ */
+export function hasDocumentSourceChanged(
+  baseMtimeMs: number | null,
+  currentMtimeMs: number | null
+): boolean {
+  if (baseMtimeMs === null || currentMtimeMs === null) return false;
+  return Math.abs(currentMtimeMs - baseMtimeMs) > DOCUMENT_SOURCE_MTIME_TOLERANCE_MS;
+}
+
+/** 更新提醒的文案：一份文档点名，多份文档给数量，两种情况都只占一行。 */
+export function describeDocumentSourceUpdate(titles: string[]): string {
+  if (titles.length === 0) return "";
+  if (titles.length === 1) return `「${titles[0]}」的源文件已在磁盘上更新`;
+  return `「${titles[0]}」等 ${titles.length} 份文档的源文件已在磁盘上更新`;
+}

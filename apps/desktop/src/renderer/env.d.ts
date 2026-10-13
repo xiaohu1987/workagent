@@ -83,8 +83,10 @@ declare global {
       chooseKnowledgeFolders: () => Promise<string[]>;
       chooseDocumentFile: (payload?: { extensions?: string[] }) => Promise<string | null>;
       chooseDocumentFiles: (payload?: { extensions?: string[] }) => Promise<string[]>;
-      readDocumentFile: (payload: { path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean }>;
+      readDocumentFile: (payload: { path: string }) => Promise<{ path: string; content: string; truncated: boolean; binary: boolean; mtimeMs: number }>;
       writeDocumentFile: (payload: { path: string; content: string }) => Promise<{ path: string }>;
+      /** 查看文档：只查源文件的最后修改时间，用来提醒磁盘上的版本已经变了。 */
+      statDocumentFiles: (payload: { paths: string[] }) => Promise<Array<{ path: string; mtimeMs: number | null }>>;
       saveDocumentFileAs: (payload: { suggestedPath?: string; content: string }) => Promise<string | null>;
       /** 查看文档：把系统拖入的文件解析成本地绝对路径，解析不出来时返回空串。 */
       resolveDroppedFilePath: (file: File) => string;

@@ -65,6 +65,8 @@ const api = {
     ipcRenderer.invoke("documents:read-file", payload),
   writeDocumentFile: (payload: { path: string; content: string }) =>
     ipcRenderer.invoke("documents:write-file", payload),
+  statDocumentFiles: (payload: { paths: string[] }) =>
+    ipcRenderer.invoke("documents:stat-files", payload),
   saveDocumentFileAs: (payload: { suggestedPath?: string; content: string }) =>
     ipcRenderer.invoke("documents:save-as", payload),
   // 查看文档：从系统拖入的文件在渲染层拿不到本地路径（File.path 已被 Electron 移除），

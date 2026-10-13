@@ -12,6 +12,7 @@ import {
   imageGenerationProtocolForModel as imageGenerationProtocolForModelGpt,
   parseOpenAiCompatibleResponse as parseOpenAiCompatibleResponseGpt
 } from "../index";
+import { preserveChineseOutputLanguage } from "./output-language";
 
 /**
  * Default openai-compatible behaviour, mirroring the historical
@@ -48,14 +49,20 @@ export const gptCompat: ModelCompat = {
   },
 
   normalizeRequestParams(
-    { input, openAiApiFormat }: ModelCompatContext,
+    context: ModelCompatContext,
     base: Record<string, unknown>
   ): Record<string, unknown> {
-    return openAiApiFormat === "openai_chat" &&
+    const { input, openAiApiFormat } = context;
+    const withReasoningEffort = openAiApiFormat === "openai_chat" &&
       isConfigurableGptReasoningModel(input.model) &&
       isGptReasoningEffort(input.reasoningEffort)
       ? { ...base, reasoning_effort: input.reasoningEffort }
       : base;
+    // GPT-family models surface their chain-of-thought as the Responses
+    // `reasoning` summary (and, on some gateways, chat `reasoning_content`).
+    // Both are user-visible in this app, so the shared Chinese-thinking
+    // reminder is appended to whichever system field this transport sends.
+    return preserveChineseOutputLanguage(context, withReasoningEffort);
   },
 
   extractVisibleStreamText(accumulated: string): string {
