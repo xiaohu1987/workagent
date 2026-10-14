@@ -334,6 +334,23 @@
   overflow-wrap: anywhere;
 }
 
+.api-card-url-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.api-card-url-control > .fc-field {
+  flex: 1 1 auto;
+  min-width: 180px;
+}
+
+.api-card-url-control .api-card-actions {
+  flex: 0 0 auto;
+  padding-bottom: 2px;
+}
+
 .api-card-actions {
   display: flex;
   align-items: center;

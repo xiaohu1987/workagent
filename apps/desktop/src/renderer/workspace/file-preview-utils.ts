@@ -41,3 +41,8 @@ export function highlightFilePreview(content: string, language: string | null): 
   if (!language || !hljs.getLanguage(language)) return source.split("\n").map(escapeHtml);
   return hljs.highlight(source, { language, ignoreIllegals: true }).value.split("\n");
 }
+
+// 「查看文档」的文件对话框复用这份后缀清单，避免扩展名映射出现第二份实现。
+export function listFilePreviewExtensions(): string[] {
+  return Object.keys(FILE_PREVIEW_LANGUAGES).sort();
+}

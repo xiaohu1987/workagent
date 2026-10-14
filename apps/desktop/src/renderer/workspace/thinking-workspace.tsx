@@ -36,17 +36,20 @@ const THINKING_STATUS_CLASS: Record<ThinkingStatus, string> = {
  * of it changed the height of the conversation and pushed the whole chat up and
  * down. It renders in this dedicated workspace tab instead, so the transcript
  * keeps a stable height while the model thinks.
- * The running turn's process notes ("过程记录") join the same tab: the transcript
- * keeps them out until the turn freezes, so the play-by-play is followed here
- * instead of watching history grow mid-run and collapse on completion.
+ * Uncommitted reasoning, process notes and unfinished answer drafts stay in this
+ * dedicated workspace; settled replies and tool summaries remain in the timeline.
  */
 export const ThinkingWorkspace = memo(function ThinkingWorkspace({
   text,
+  draftText = "",
+  draftStreaming = false,
   notes = [],
   taskRunning,
   streaming
 }: {
   text: string;
+  draftText?: string;
+  draftStreaming?: boolean;
   notes?: string[];
   taskRunning: boolean;
   streaming: boolean;
@@ -62,6 +65,7 @@ export const ThinkingWorkspace = memo(function ThinkingWorkspace({
   // body on every growth, however the bytes arrive.
   const hasText = text.trim().length > 0;
   const hasNotes = notes.length > 0;
+  const hasDraft = draftText.trim().length > 0;
   useLayoutEffect(() => {
     const body = bodyRef.current;
     const stream = streamRef.current;
@@ -73,9 +77,9 @@ export const ThinkingWorkspace = memo(function ThinkingWorkspace({
     const observer = new ResizeObserver(pinToLatest);
     observer.observe(stream);
     return () => observer.disconnect();
-  }, [hasText, hasNotes]);
+  }, [hasText, hasNotes, hasDraft]);
 
-  if (!hasText && !hasNotes) {
+  if (!hasText && !hasNotes && !hasDraft) {
     return (
       <WorkspaceEmptyState
         icon={<IconBrain />}
@@ -105,6 +109,12 @@ export const ThinkingWorkspace = memo(function ThinkingWorkspace({
               {notes.map((note) => (
                 <p key={note} className="thinking-workspace-note">{note}</p>
               ))}
+            </div>
+          ) : null}
+          {hasDraft ? (
+            <div className="thinking-workspace-draft" aria-label="回答草稿">
+              <div className="thinking-workspace-draft-label">回答草稿 · 尚未定稿</div>
+              <StreamedText text={draftText} instant={!draftStreaming} />
             </div>
           ) : null}
         </div>

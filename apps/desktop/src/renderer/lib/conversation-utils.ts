@@ -55,6 +55,21 @@ export type ContextUsage = {
   toolCount?: number;
 };
 
+/**
+ * The immutable conversation portion of the context estimate.
+ *
+ * The composer changes on every keystroke, while messages and tool arguments
+ * usually stay fixed. Keeping these character counts alongside a memoized
+ * history lets the composer estimate only its pending input instead of
+ * rebuilding and scanning the entire conversation for every keypress.
+ */
+export type ContextUsageHistory = {
+  codePoints: number;
+  leadingTrimmedCodePoints: number;
+  trailingTrimmedCodePoints: number;
+  hasContent: boolean;
+};
+
 export function composerAttachmentKey(attachment: ComposerAttachment | ComposerAttachmentInput): string {
   switch (attachment.kind) {
     case "code":
@@ -213,6 +228,7 @@ export function buildContextUsage(input: {
   selectedSkillCount: number;
   mcpServerCount: number;
   pendingInput: string;
+  history?: ContextUsageHistory;
   compaction?: ContextCompactionRecord | null;
   measurement?: ContextMeasurementRecord | null;
 }): ContextUsage {
@@ -249,23 +265,10 @@ export function buildContextUsage(input: {
       toolCount: input.measurement.toolCount
     };
   }
-  const compactedAt = input.compaction ? Date.parse(input.compaction.createdAt) : Number.NaN;
-  const conversationText = input.compaction
-    ? [
-        ...input.messages
-          .filter((message) => Date.parse(message.createdAt) > compactedAt)
-          .map((message) => message.content),
-        ...input.toolCalls
-          .filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > compactedAt)
-          .map((toolCall) => toolCall.argumentsJson),
-        input.pendingInput
-      ].join("\n")
-    : [
-        ...input.messages.map((message) => message.content),
-        ...input.toolCalls.map((toolCall) => toolCall.argumentsJson),
-        input.pendingInput
-      ].join("\n");
-  const recentTokens = Math.max(0, estimateContextTokens(conversationText));
+  const recentTokens = Math.max(0, input.history
+    ? estimateContextTokensWithPending(input.history, input.pendingInput)
+    : estimateContextTokens(buildContextUsageHistoryText(input.messages, input.toolCalls, input.compaction) +
+        `\n${input.pendingInput}`));
   const conversationTokens = input.compaction
     ? Math.max(1, input.compaction.afterTokens) + recentTokens
     : Math.max(1, recentTokens);
@@ -287,6 +290,68 @@ export function buildContextUsage(input: {
     compaction: input.compaction ?? null,
     measurement: null
   };
+}
+
+/** Build the static part of the fallback context estimate when its inputs change. */
+export function buildContextUsageHistory(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[],
+  compaction?: ContextCompactionRecord | null
+): ContextUsageHistory {
+  const text = buildContextUsageHistoryText(messages, toolCalls, compaction);
+  const codePoints = countCodePoints(text);
+  const leadingTrimmedCodePoints = countCodePoints(text) - countCodePoints(text.trimStart());
+  const trailingTrimmedCodePoints = countCodePoints(text) - countCodePoints(text.trimEnd());
+  return {
+    codePoints,
+    leadingTrimmedCodePoints,
+    trailingTrimmedCodePoints,
+    hasContent: text.trim().length > 0
+  };
+}
+
+function buildContextUsageHistoryText(
+  messages: MessageRecord[],
+  toolCalls: ToolCallRecord[],
+  compaction?: ContextCompactionRecord | null
+): string {
+  const compactedAt = compaction ? Date.parse(compaction.createdAt) : Number.NaN;
+  const messageContents = compaction
+    ? messages
+        .filter((message) => Date.parse(message.createdAt) > compactedAt)
+        .map((message) => message.content)
+    : messages.map((message) => message.content);
+  const toolArguments = compaction
+    ? toolCalls
+        .filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > compactedAt)
+        .map((toolCall) => toolCall.argumentsJson)
+    : toolCalls.map((toolCall) => toolCall.argumentsJson);
+  return [...messageContents, ...toolArguments].join("\n");
+}
+
+/** Match `[history, pendingInput].join("\n").trim()` without rescanning history. */
+export function estimateContextTokensWithPending(history: ContextUsageHistory, pendingInput: string): number {
+  const pendingCodePoints = countCodePoints(pendingInput);
+  const pendingLeadingTrimmedCodePoints = pendingCodePoints - countCodePoints(pendingInput.trimStart());
+  const pendingTrailingTrimmedCodePoints = pendingCodePoints - countCodePoints(pendingInput.trimEnd());
+  const pendingHasContent = pendingInput.trim().length > 0;
+  const combinedCodePoints = history.codePoints + 1 + pendingCodePoints;
+  const leadingTrimmedCodePoints = history.hasContent
+    ? history.leadingTrimmedCodePoints
+    : history.codePoints + 1 + pendingLeadingTrimmedCodePoints;
+  const trailingTrimmedCodePoints = pendingHasContent
+    ? pendingTrailingTrimmedCodePoints
+    : pendingCodePoints + 1 + history.trailingTrimmedCodePoints;
+  const normalizedCodePoints = Math.max(0, combinedCodePoints - leadingTrimmedCodePoints - trailingTrimmedCodePoints);
+  // When both portions are whitespace-only, their trimmed regions overlap.
+  // The maximum above makes the concatenated result's normalized length zero.
+  return Math.ceil(normalizedCodePoints / 2.8);
+}
+
+function countCodePoints(value: string): number {
+  let count = 0;
+  for (const _character of value) count += 1;
+  return count;
 }
 
 export function estimateContextTokens(value: string): number {
@@ -547,10 +612,9 @@ export function buildConversationTurnSections(entries: TimelineEntry[]): Convers
     const { lastFormalAssistantEntryId, lastAssistantEntryId, ...section } = current;
     sections.push({
       ...section,
-      // The collapsed turn renders exactly this entry, so it must be an entry that
-      // actually carries the turn's answer. A turn whose final answer is classified as
-      // commentary used to have no formal entry at all, which left `summaryEntryId`
-      // null and the whole conclusion folded away until the thread was reopened.
+      // The collapsed turn uses this entry as its canonical answer summary. A turn whose
+      // final answer is classified as commentary has no formal entry, so fall back to the
+      // last assistant message instead of folding the conclusion away.
       summaryEntryId: lastFormalAssistantEntryId ?? lastAssistantEntryId
     });
   };
@@ -596,15 +660,12 @@ export function shouldKeepTimelineEntryWhenTurnCollapsed(
     return true;
   }
   // A collapsed turn keeps its user message, its file summary, generated media and the
-  // prose the user is reading: the turn's answer (its summary entry) plus every formal
-  // assistant message. Commentary progress notes and tool activity are what collapsing
-  // folds away, and keeping *all* assistant text is what left finished turns expanded.
+  // prose the user is reading. The process folds away with the turn: commentary lives in
+  // the thinking workspace, and tool activity collapses together with it, so a settled
+  // turn reads as its conclusion instead of replaying every command it ran.
   //
-  // The formal-prose clause is what makes a conclusion stop disappearing: collapsing used
-  // to render only the summary entry, so a turn that collapsed before its final answer had
-  // reached the transcript showed no answer at all until the thread was reopened. Keeping
-  // formal prose means nothing already on screen can blink out, whichever entry the summary
-  // fallback picked.
+  // Keeping formal assistant messages means the conclusion does not blink out when a
+  // turn is collapsed, whichever entry the summary fallback picked.
   return entry.id === turn.userEntryId
     || entry.id === turn.summaryEntryId
     || entry.kind === "file-summary"
@@ -1588,6 +1649,54 @@ export function upsertRuntimeToolCallSummary(
   return mergeSnapshotRecords(toolCalls, [toolCall], (item) => item.startedAt);
 }
 
+function toolCallStatusRank(status: ToolCallSummary["status"]): number {
+  if (status === "pending") return 0;
+  if (status === "running") return 1;
+  return 2;
+}
+
+function shouldKeepExistingToolCall(existing: ToolCallSummary, incoming: ToolCallSummary): boolean {
+  const existingRank = toolCallStatusRank(existing.status);
+  const incomingRank = toolCallStatusRank(incoming.status);
+  if (existingRank !== incomingRank) return existingRank > incomingRank;
+
+  if (existingRank === 2) {
+    if (existing.completedAt && !incoming.completedAt) return true;
+    if (!existing.completedAt || !incoming.completedAt) return false;
+    return existing.completedAt > incoming.completedAt;
+  }
+  return false;
+}
+
+/**
+ * Merge tool summaries from snapshots and runtime events without allowing an
+ * older running row to replace a completed runtime update for the same call.
+ */
+export function mergeRuntimeToolCallSummaries(
+  ...sources: ReadonlyArray<ReadonlyArray<ToolCallSummary>>
+): ToolCallSummary[] {
+  const first = sources[0] ?? [];
+  const mergedById = new Map<string, ToolCallSummary>();
+  for (const source of sources) {
+    for (const incoming of source) {
+      const existing = mergedById.get(incoming.id);
+      if (!existing || !shouldKeepExistingToolCall(existing, incoming)) {
+        mergedById.set(incoming.id, incoming);
+      }
+    }
+  }
+  const merged = [...mergedById.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+  if (first.length === merged.length && first.every((toolCall, index) => {
+    const mergedToolCall = merged[index];
+    const keys = Object.keys(toolCall) as Array<keyof ToolCallSummary>;
+    return keys.length === Object.keys(mergedToolCall).length &&
+      keys.every((key) => toolCall[key] === mergedToolCall[key]);
+  })) {
+    return first as ToolCallSummary[];
+  }
+  return merged;
+}
+
 export type RuntimeToolCallCompletion = Omit<Pick<
   ToolCallSummary,
   "id" | "threadId" | "status" | "resultJson" | "resultSize" | "hasFullResult" | "completedAt"
@@ -1860,30 +1969,10 @@ export function parseNumericAttribute(value?: string) {
   return Number.isFinite(next) ? next : undefined;
 }
 
-export function filterTranscriptMessages(messages: MessageRecord[], threadStatus?: ThreadRecord["status"] | null) {
+export function filterTranscriptMessages(messages: MessageRecord[], _threadStatus?: ThreadRecord["status"] | null) {
   if (messages.length === 0) {
     return messages;
   }
-
-  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
-    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
-    : null;
-  const turnIdsWithOutcome = new Set<string>();
-  let hasStandaloneOutcome = false;
-
-  for (const message of messages) {
-    if (!isOutcomeTranscriptMessage(message)) {
-      continue;
-    }
-
-    if (message.turnRunId) {
-      turnIdsWithOutcome.add(message.turnRunId);
-    } else {
-      hasStandaloneOutcome = true;
-    }
-  }
-
-  const hasAnyOutcome = hasStandaloneOutcome || turnIdsWithOutcome.size > 0;
 
   const filteredMessages = messages.filter((message) => {
     if (message.content.trimStart().startsWith("[internal:")) {
@@ -1894,25 +1983,9 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
       return false;
     }
 
-    if (!isCommentaryOnlyTranscriptMessage(message)) {
-      return true;
-    }
-
-    if (message.turnRunId) {
-      // A running turn's process notes ("过程记录") are not frozen history yet: the
-      // turn can still fold them away the moment its answer lands, and painting them
-      // here only made the transcript grow mid-run and snap back on completion. They
-      // render in the thinking workspace instead (selectActiveTurnProcessNotes).
-      // Frozen turns keep the old rule: an answered turn folds its notes away, an
-      // answerless one keeps them so the turn body is never empty.
-      if (activeTurnRunId && message.turnRunId === activeTurnRunId) {
-        return false;
-      }
-
-      return !turnIdsWithOutcome.has(message.turnRunId);
-    }
-
-    return !hasAnyOutcome;
+    // Commentary is provisional process output. Keep it in the thinking workspace
+    // so an intermediate snapshot cannot paint it and then remove it on completion.
+    return !isCommentaryOnlyTranscriptMessage(message);
   });
 
   const visibleAssistantMessages = new Set<string>();
@@ -1944,25 +2017,20 @@ export function filterTranscriptMessages(messages: MessageRecord[], threadStatus
 }
 
 /**
- * The active turn's process notes ("过程记录"), in arrival order, for the thinking
- * workspace. The transcript deliberately hides these while their turn runs (see
- * filterTranscriptMessages): they are still provisional, so the panel carries them
- * live and the frozen history only keeps what the turn settled on. The walk mirrors
- * the transcript's own rules - only the newest turn, only commentary-only messages,
- * one entry per distinct text, newest notes last - and `limit` caps the list.
+ * The active turn's process notes ("过程记录") are shown in the thinking workspace,
+ * not in the transcript. They are provisional until the turn settles, so the history
+ * never paints a row that a later snapshot can retract.
  */
 export function selectActiveTurnProcessNotes(
   messages: MessageRecord[],
   threadStatus?: ThreadRecord["status"] | null,
   limit = 6
 ): string[] {
-  if (messages.length === 0) {
+  if (messages.length === 0 || !isThreadExecutionInProgress(threadStatus ?? null)) {
     return [];
   }
 
-  const activeTurnRunId = isThreadExecutionInProgress(threadStatus ?? null)
-    ? [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null
-    : null;
+  const activeTurnRunId = [...messages].reverse().find((message) => message.turnRunId)?.turnRunId ?? null;
   if (!activeTurnRunId) {
     return [];
   }
@@ -2516,6 +2584,14 @@ export function reconcileAssistantDraftUpdate(
   );
   next[draft.draftId] = { ...existing, ...draft, completed: false };
   return next;
+}
+
+/** Apply only the latest queued update per draft after the renderer batch window. */
+export function applyAssistantDraftUpdateBatch(
+  current: Record<string, AssistantDraft>,
+  updates: ReadonlyArray<AssistantDraft>
+): Record<string, AssistantDraft> {
+  return updates.reduce(reconcileAssistantDraftUpdate, current);
 }
 
 export function shouldKeepAssistantDraft(

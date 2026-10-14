@@ -1,4 +1,4 @@
-import { DEFAULT_RESPONSE_TONE, normalizeCompletionAuditSettings, normalizeSandboxMode, normalizeSandboxNetworkAccess, withGptReasoningCapabilities } from "@shared-types";
+import { DEFAULT_RESPONSE_TONE, normalizeCompletionAuditSettings, normalizeHiddenSidebarItems, normalizeSandboxMode, normalizeSandboxNetworkAccess, withGptReasoningCapabilities } from "@shared-types";
 import type { ApiFormat, AppConfig, McpServerConfig, ModelProfile, ProviderDefinition, ProviderTemplate, ProviderType } from "@shared-types";
 
 export type ProviderTypeOption = {
@@ -114,6 +114,7 @@ export function cloneConfig(config: AppConfig): AppConfig {
     desktop: {
       ...config.desktop,
       completionAudit: normalizeCompletionAuditSettings(config.desktop),
+      hiddenSidebarItems: normalizeHiddenSidebarItems(config.desktop?.hiddenSidebarItems),
       sandboxMode: normalizeSandboxMode(config.desktop?.sandboxMode),
       sandboxNetworkAccess: normalizeSandboxNetworkAccess(config.desktop?.sandboxNetworkAccess)
     },

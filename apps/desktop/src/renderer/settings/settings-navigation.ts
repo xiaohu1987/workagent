@@ -19,7 +19,6 @@ export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string
   { id: "cloudNotes", label: "云笔记", hint: "连接自托管云笔记服务并同步笔记" },
   { id: "knowledge", label: "知识库", hint: "导入、绑定和 OKF Bundle" },
   { id: "memory", label: "记忆", hint: "查看和清理错误解决方案记忆" },
-  { id: "apiFavorites", label: "接口卡片", hint: "管理收藏的 API 卡片,从 + 菜单快速唤出" },
   { id: "capabilities", label: "能力中心", hint: "管理独立 Skill、用户技能和插件" },
   { id: "appearance", label: "应用背景", hint: "导入图片，并调整背景与各模块透明度" },
   { id: "usage", label: "统计", hint: "查看模型调用、Token 和缓存趋势" },
@@ -30,7 +29,7 @@ export const SETTINGS_MENU_GROUPS: SettingsMenuGroup[] = [
   { id: "general", label: "智能运行", hint: "运行策略和输出审计", tabs: ["general"], icon: IconGear },
   { id: "models", label: "模型与供应商", hint: "供应商、模型与多模态", tabs: ["provider", "multimodal"], icon: IconGlobe },
   { id: "connections", label: "连接", hint: "云笔记、MCP 与数据库", tabs: ["mcp", "database", "cloudNotes"], icon: IconMcp },
-  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory", "apiFavorites"], icon: IconKnowledge },
+  { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory"], icon: IconKnowledge },
   { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"], icon: IconSkills },
   { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"], icon: IconSinglePanel }
 ];

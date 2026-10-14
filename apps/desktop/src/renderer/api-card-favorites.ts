@@ -232,6 +232,15 @@ export function renameApiCardFavorite(id: string, name: string): void {
   );
 }
 
+/** 更新收藏卡片的接口配置(URL/入参/授权等),收藏 id、名称与收藏时间保持不变 */
+export function updateApiCardFavoriteConfig(id: string, config: ApiCardConfig): void {
+  const target = getFavorites().find((favorite) => favorite.id === id);
+  if (!target) return;
+  persistFavorites(
+    getFavorites().map((favorite) => (favorite.id === id ? { ...favorite, config } : favorite))
+  );
+}
+
 const EMPTY_FAVORITES: ApiCardFavorite[] = [];
 
 export function useApiCardFavorites(): ApiCardFavorite[] {

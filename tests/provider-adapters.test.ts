@@ -2507,6 +2507,45 @@ describe("OpenAiCompatibleProvider", () => {
     expect(grok).toMatchObject({ reasoning_effort: "high" });
   });
 
+  it("asks DeepSeek to keep deep-thinking content in Chinese for Chinese conversations", async () => {
+    mocks.chatCreate.mockResolvedValue({ choices: [{ message: { content: "Done." }, finish_reason: "stop" }] });
+    const provider: ProviderDefinition = {
+      id: "deepseek-gateway",
+      type: "openai-compatible",
+      compatibilityProfile: "deepseek",
+      apiKey: "[REDACTED]"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.",
+      transcript: [{ role: "user", content: "请分析这个项目" }],
+      availableTools: [],
+      model: {
+        id: "deepseek-flash",
+        providerId: provider.id,
+        displayName: "DeepSeek Flash",
+        contextWindow: 128_000,
+        supportsStreaming: false,
+        supportsToolCalling: true,
+        supportsParallelToolCalls: true,
+        supportsJsonOutput: true,
+        supportsMultimodalInput: false,
+        supportsReasoningSummary: true,
+        role: "reasoning"
+      },
+      provider,
+      reasoningEffort: "xhigh",
+      stream: false
+    });
+
+    const systemContent = mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content as string;
+    expect(systemContent).toContain("[Chinese output compatibility]");
+    expect(systemContent).toContain("latest user request is in Chinese");
+    expect(systemContent).toContain("write every reasoning summary, analysis, plan, process note, and answer draft");
+    expect(systemContent).toContain("Do not emit English natural-language prose in any surfaced reasoning channel");
+    expect(systemContent).toContain("reasoning_content");
+    expect(systemContent).toContain("过程记录和回答草稿也必须直接使用简体中文");
+  });
+
   it("uses Grok's plain-text completion-audit compatibility protocol", async () => {
     mocks.chatCreate.mockResolvedValue({
       choices: [{ message: { content: "APPROVED" } }]
@@ -4344,6 +4383,63 @@ describe("native provider tool protocols", () => {
       reasoning: { effort: "high", summary: "concise" }
     });
     expect(responsesRequest).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("keeps GPT thinking in Chinese by appending the reminder to Responses instructions", async () => {
+    mocks.responsesCreate.mockResolvedValue({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "完成" }] }] });
+    const provider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "[REDACTED]"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "帮我看一下这个文件" }], availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning" },
+      provider, reasoningEffort: "high", stream: false
+    });
+
+    const instructions = mocks.responsesCreate.mock.calls.at(-1)?.[0].instructions as string;
+    expect(instructions).toContain("[Chinese output compatibility]");
+    expect(instructions).toContain("latest user request is in Chinese");
+    expect(instructions).toContain("write every reasoning summary, analysis, plan, process note, and answer draft");
+    // GPT streams its chain-of-thought through the Responses reasoning summary,
+    // so the reminder must name that channel explicitly instead of only
+    // mentioning reasoning_content and <think> blocks.
+    expect(instructions).toContain("reasoning_summary_text");
+    expect(instructions).toContain("Do not emit English natural-language prose in any surfaced reasoning channel");
+    expect(instructions).toContain("process note");
+    // Appended exactly once, even though several shells re-run the shared hook.
+    expect(instructions.split("[Chinese output compatibility]")).toHaveLength(2);
+  });
+
+  it("keeps GPT thinking in Chinese when the Chat transport builds a system message", async () => {
+    mocks.chatCreate.mockResolvedValue({
+      choices: [{ message: { content: '{"assistant_message":"已完成","tool_calls":[],"end_turn":true,"goal_completed":true}' } }]
+    });
+    const provider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", apiFormat: "openai_chat", apiKey: "[REDACTED]"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "帮我看一下这个文件" }], availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id },
+      provider, stream: false
+    });
+
+    const systemContent = mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content as string;
+    expect(systemContent).toContain("[Chinese output compatibility]");
+    expect(systemContent).toContain("Do not emit English natural-language prose in any surfaced reasoning channel");
+  });
+
+  it("does not force Chinese thinking on GPT when the user asks for English", async () => {
+    mocks.responsesCreate.mockResolvedValue({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "Done." }] }] });
+    const provider: ProviderDefinition = {
+      id: "openai", type: "openai-compatible", apiFormat: "openai_responses", apiKey: "[REDACTED]"
+    };
+    await new ProviderFactory().create(provider).runTurn({
+      systemPrompt: "Answer.", transcript: [{ role: "user", content: "用英文回答：这个文件是做什么的？" }], availableTools: [],
+      model: { ...model, id: "gpt-5.6-terra", providerId: provider.id, role: "reasoning" },
+      provider, reasoningEffort: "high", stream: false
+    });
+
+    expect(mocks.responsesCreate.mock.calls.at(-1)?.[0].instructions).toBe("Answer.");
   });
 
   it("sends the thread cache affinity key as Responses prompt_cache_key only", async () => {

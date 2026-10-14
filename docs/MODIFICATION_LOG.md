@@ -2,6 +2,42 @@
 
 记录用户提出并已落地的修改。后续每次完成用户请求后，在本文件追加一条记录。
 
+## 2026-10-14
+
+- 加强 GPT 中文会话的深度思考语言约束：当用户最近一条请求为中文，或英文短句承接已建立的中文对话时，明确要求 Responses API `reasoning_summary_text`、Chat Completions `reasoning_content` 与 `<think>` 中展示的分析和计划直接使用简体中文，不要先用英文思考再翻译；保留用户明确要求其他语言时的例外。更新 Provider 回归断言覆盖 GPT 的 Responses 与 Chat 两种传输。
+- 移除「深度思考」页签会隐藏英文并显示兜底提示的逻辑，面板现在原样呈现模型的推理摘要、回答草稿和过程记录；加强 GPT 中文会话指令，明确要求这些可见内容直接以简体中文生成。新增面板内容不被隐藏或替换的回归测试，并加强 Responses 与 Chat 请求指令断言。
+
+## 2026-10-13
+
+- 优化长任务期间的终端输出刷新：`terminal.output` 事件按线程暂存并以 100ms 批量提交到运行活动面板，连续同标签输出合并为一条，单条输出限制为 20,000 字符；遇到状态、工具或消息边界事件会先冲刷对应线程，保持活动顺序。新增运行活动批处理与长度上限回归测试。
+
+- 侧栏「查看文档」入口右侧显示已打开的文档数：数量为 0 时不渲染任何徽标，入口保持原样。计数直接取 `useDocumentTabs` 的页签集合（该状态位于 `App`，面板让出聊天区后已打开的文档仍保留），`HistorySidebar` 只新增 `documentViewerOpenCount` 入参、经 `railItemCounts` 映射后由 `renderRailItem` 渲染，不自己持有状态；徽标样式 `.sidebar-nav-count` 追加在 `styles.css` 侧栏入口区块，亮/暗主题各一条。回归测试 `tests/document-viewer-inline-panel.test.ts` 新增「数量透传、为 0 时不渲染、样式类名存在」断言，该文件 23 项通过，完整 `vitest run` 109 个文件 1646 项通过；类型检查仍只剩既有基线报错，本次改动文件未新增报错。
+
+- 「查看文档」的源文件外部改动提醒改为在「切回来」时检查：取消面板打开期间每 4 秒轮询源文件时间戳的做法，删掉 `DOCUMENT_SOURCE_CHECK_INTERVAL_MS` 常量与 `window.setInterval`/`clearInterval`，改为面板每次打开（收起后卸载、切回来重新挂载）时检查一次。命中后仍只在页签条下给一条提醒，由用户选择「重新加载」或「保留当前内容」，不自动覆盖正在编辑的文本。检查函数依赖稳定的 `applyTabs`（依赖为空数组），所以 effect 只在挂载时执行一次，不会随编辑重跑。回归测试同步改为断言「不含定时器与间隔常量」，并守住「面板由 `documentViewerPresence.value` 条件渲染」这一触发点前提——若将来改成常挂载，该断言会失败以防检查点失效；相关用例 24 项通过，完整 `vitest run` 109 个文件 1650 项通过、1 项跳过。
+
+- 「查看文档」补上读取大文件时的加载特效：加载中不再复用通用空态，改为面板自带的加载视图（转圈、点名「正在读取「文件名」」、一条往返扫描的进度轨），页签栏同步在对应页签上显示读取指示，切到别的页签也能看出这份还没读完，因此不再从 `panels` 引入 `WorkspaceEmptyState`。样式新增 `.document-viewer-loading*`、`.document-tab-loading` 与 `document-viewer-loading-scan` 关键帧，并把新动画一并纳入 `prefers-reduced-motion` 降级。回归测试 `tests/document-viewer-inline-panel.test.ts` 新增「加载视图 + 页签指示 + 样式契约」用例，该文件 25 项通过，完整 `vitest run` 109 个文件 1662 项通过、1 项跳过；`apps/desktop` 类型检查未出现本次改动文件的报错。
+
+## 2026-10-12
+
+- 「查看文档」的两处调整：①空白页另存为的默认文件名由 `.md` 改为 `.txt`，与空白页按纯文本起手保持一致，保存分支与默认名推导（`getUntitledDocumentSuggestedFileName`）不变；②拖入文件改为总是新开页签，`openPaths` 增加 `openDuplicatePaths` 选项，拖入（`openDroppedPaths`）时只在同一批拖入内部去重、不再命中面板里已打开的同路径页签，因此已经有文件打开时再拖入也会各占一个新页签，文件对话框仍按路径去重以避免重复打开同一个文件。回归测试同步更新 `tests/document-viewer-inline-panel.test.ts`（默认名断言改为 `.txt`，新增拖入不去重的三条断言），该文件全部通过，完整 `vitest run` 无回归。
+- 「查看文档」标题栏的「+」改为新建空白页，不再打开文件选择框：点它直接得到一个未落盘的「未命名 N」页签（默认按纯文本源码编辑），并新增一个独立图标按钮负责打开已有文件，两者共用 `.document-viewer-open-button` 样式；空白页保存时走另存为，默认文件名按标题推导成 `未命名 N.md`，另存成功后页签换成新路径与文件名。连点「+」会复用已有的干净空白页，不会堆出一排空页签；页签在未落盘时标题提示为「尚未保存到磁盘」。新增 `getUntitledDocumentTitle`、`getNextUntitledDocumentTitle`、`getUntitledDocumentSuggestedFileName` 三个工具函数集中处理未命名标题与默认文件名，`saveTab` 在没有路径时委托给 `saveTabAs`，不重复实现落盘逻辑。归属改动：`workspace/document-viewer-utils.ts`、`hooks/use-document-tabs.ts`、`workspace/document-viewer-panel.tsx`；回归测试 `tests/document-viewer-inline-panel.test.ts` 扩到 21 项并全部通过。
+
+- 按随手记的观感重排「查看文档」面板的标题栏与空态：标题栏左侧只留一个居左的「+」图标按钮（原来的「打开文件」文字按钮已移除），同时去掉标题栏里的面板名称与说明文案整行，把识别出的文档类型与「预览 / 源码」切换统一收在右侧；空态从一行素文字改成居中的引导卡片，含图标、标题、支持的格式徽标（Markdown / HTML / C# / SQL / JSON / 纯文本）与一个文字化的打开入口，徽标由 `DOCUMENT_EMPTY_BADGES` 统一提供。样式层补齐 `.document-viewer-open-button`、`.document-viewer-empty-*` 与 `.document-viewer-kind-chip`，并删掉已无引用的 `.document-viewer-choose-button`；回归测试同步新增标题栏与空态断言，`tests/document-viewer-inline-panel.test.ts` 16 项、完整 `vitest run` 107 个文件 1612 项全部通过。
+
+- 新增「查看文档」内联面板，侧栏入口排在「接口卡片」下方：不做弹窗，而是接管聊天区显示与操作，并与随手记、接口卡片互斥——打开时会收起这两者、退出分享模式并收起终端抽屉，再点一次或按 Esc 收起，点左侧任意会话或「新建任务」也直接切回聊天。面板按文件后缀名决定渲染方式：Markdown 与 HTML 可在「预览 / 源码」之间自由切换，C#、SQL 等代码文件复用既有 hljs 语法高亮，其余按纯文本显示；读取走只读的 `window.codexh.readDocumentFile` / `chooseDocumentFile`，不提供编辑。新增 `workspace/document-viewer-panel.tsx` 与 `workspace/document-viewer-utils.ts`，配色与布局沿用 `.document-viewer-sheet` 既有作用域，仅在 `styles.css` 补齐内联容器的尺寸与让位规则；新增回归测试 `tests/document-viewer-inline-panel.test.ts`，覆盖侧栏顺序、面板挂载位置、互斥与切换逻辑、Esc 关闭、后缀到渲染方式的映射以及样式契约。
+
+- 修复输入框右侧「清空本次聊天」按钮提示已清空、聊天记录却没有变化的问题：清空动作此前只删掉了快照缓存与增量游标，本地快照基线仍被紧随其后的全量读取当作“服务端比本地旧”的依据，于是刚在服务端删除的消息又被合并回界面。现在改为复用 `invalidateThreadSnapshotForFullRefresh` 一并作废快照缓存、增量游标、在途读取请求与运行时消息映射，并丢弃本地快照基线与已上屏消息 id；新增回归测试覆盖“基线残留会复原旧记录、清空后服务端空列表保持为空”。替换了原先分别 `delete snapshotCursorByThreadRef`、`delete persistedRuntimeMessagesRef` 与删除快照缓存的三行局部清理写法。
+
+## 2026-10-10
+
+- 调整完全访问的默认值：新建任务（普通对话与项目任务一致）默认开启“完全访问”，空状态界面重新默认预勾选；空白页手动关闭后创建的首个任务会按当前选择持久化，创建后仍可随时手动修改。
+
+- 工具调用明细组默认折叠：取消“运行中自动展开、完成后仍保持展开”的行为，转录中的工具活动组只保留一行摘要，明细仅在用户点击摘要后展开；正在运行的调用也不再自动撑开详情。同步更新对应回归测试（运行中的组保持折叠、不再自动展开）。
+
+- 任务完成后工具调用随文字一起收起：撤销“折叠回合保留工具活动组摘要”的做法，回合折叠时工具调用明细与过程文字一并收起，转录只留下结论与文件摘要；展开回合仍可查看完整工具明细。同步更新回归测试。
+
+- 修复中文会话中深度思考内容漂移为英文的问题：共享的中文输出兼容提醒现在除可见回复外，还以“必须用简体中文思考”的强制措辞要求模型把展示在“深度思考”面板中的推理内容（`reasoning_content`、`<think>` 块）保持为简体中文——即使系统指令、工具输出与历史消息是英文，推理、分析与规划内容也一律使用简体中文；覆盖 DeepSeek、Kimi、Hunyuan、Qwen、Agnes、Gemini 等适配器；`packages/provider-adapters/src/models/output-language.ts` 统一生效，新增 `deepseek-flash` 思考请求回归测试；相关测试文件 192 项全部通过，完整 `vitest run` 通过（103 个测试文件、1566 项用例通过、1 项跳过）。
+
 ## 2026-10-03
 
 - 收紧可见浏览器的调用条件：普通研究和无关任务不再向模型提供 `browser.*` 控制工具；只有用户明确要求打开/操作网页，或当前执行中的前端实现计划确需浏览器验证时才开放。提示词明确区分后台网页读取与可见浏览器，并将普通聊天右侧工作区默认标签改为“深度思考”，避免展开面板时误落到浏览器。
@@ -109,3 +145,10 @@
 - Restrict GPA Git mutations to explicit user requests: staging, reverting, committing, pushing, pulling, PR creation, and worktree changes are hidden and blocked by default, including equivalent shell commands. Read-only Git inspection remains available for verification.
 - Hide the right-side Git workspace until the current task directory is successfully identified as a Git repository with a resolved repository root. Unknown, non-Git, and stale snapshots no longer display a branch or change list.
 - Tighten Git panel ownership further: the resolved Git root must exactly match the selected task's project directory. A repository detected only above or below that directory is treated as unrecognized and is hidden.
+
+- Add a document viewer beside the API cards: a sidebar entry below API cards opens a chat-area panel instead of an overlay dialog. Files render by extension — Markdown reuses the chat renderer with preview/source switching, HTML runs in a sandboxed iframe, and code or text files use the existing highlight.js pipeline with line numbers — while several files open as tabs with unsaved-change dots, in-place editing, Ctrl+S save, save-as, LF/CRLF-faithful write-back, and a save/discard prompt before closing a dirty tab or collapsing the panel. The active tab's detected document kind is shown next to the panel title, and reads and writes go through the new `documents:*` IPC channels wired in the main process, preload, and renderer types.
+
+- Rework the API card panel into a two-column workspace: the favorites panel now opens in the chat area as a full-height layout with the favorite list on the left and the selected card's detail on the right. Rows use an `is-selected` state with the method color rail and icon-only actions, the sidebar carries the search box and hint, and the detail column hosts the card editor, so both columns fill the whole panel without outer padding.
+
+- Make the inline panels fill the chat area: the new-task page rule (`.chat-canvas.is-new-task footer { display: flex }`) has the same specificity as the panel hiding rules but is declared later in the stylesheet, so it overrode `display: none` and left the welcome hero, composer, and workspace bar visible below the panel. The hiding rules for the quick notes, API card, and document viewer panels are now declared at the end of the stylesheet with `display: none !important`, so each panel occupies the whole chat area while it is open.
+- Reuse the quick-notes skeleton for the API card panel: the favorites panel now renders with the `quick-notes-*` structure (`quick-notes-sheet`, `-inline`, `-layout`, `-list`, `-items`, `-item`, `-editor`, `-footer`) instead of its own `api-favorites-*` skeleton, so list rows, the detail column, and the bottom action row match the quick notes panel one-to-one. API-card-specific styling is scoped to `.api-favorites-inline` with a `:root` prefix and only adds the method rail per `data-method`, the method label color, the search-box spacing, and the detail title/name styles, which keeps quick notes itself untouched.

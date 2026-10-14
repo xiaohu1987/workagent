@@ -66,8 +66,10 @@ import {
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldPreserveObservedRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldRefreshSelectedSnapshotForToolEvent,
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
   mergeSnapshotSubagents,
@@ -108,6 +110,7 @@ import {
   TimelineEntry,
   TimelineIncrementalCache,
   buildContextUsage,
+  buildContextUsageHistory,
   buildConversationTurnSections,
   buildPlanTimelineItems,
   buildTimelineEntriesIncremental,
@@ -117,6 +120,7 @@ import {
   createOptimisticThreadSnapshot,
   dropSupersededOptimisticMessages,
   filterTranscriptMessages,
+  selectActiveTurnProcessNotes,
   formatComposerAttachments,
   getActivePlanTimelineItem,
   getAssistantDraftDisplayContent,
@@ -136,6 +140,7 @@ import {
   getToolActivityKind,
   getToolActivityTarget,
   getToolProcessingLabel,
+  applyAssistantDraftUpdateBatch,
   isAssistantDraftPhase,
   isFileWriteTool,
   isInternalAgentProtocolMessage,
@@ -145,6 +150,7 @@ import {
   isSubagentWaitTool,
   mergeMessagesAfterOptimisticUserEdit,
   collectMissingSnapshotRecords,
+  mergeRuntimeToolCallSummaries,
   mergeRecoveredSnapshotMessages,
   mergeServerMessagesWithNewerLocal,
   mergeSnapshotRecords,
@@ -163,7 +169,6 @@ import {
   resolveLatestThreadRecord,
   rewindThreadSnapshotForMessageEdit,
   selectActiveAssistantDraft,
-  selectActiveTurnProcessNotes,
   shouldKeepAssistantDraft,
   shouldCommitRuntimeMessageImmediately,
   shouldShowRuntimeActivityPanel,
@@ -210,11 +215,10 @@ import {
   UsageStatisticsPanel
 } from "./workspace/usage-stats";
 import { TokenUsagePopover } from "./workspace/token-usage-popover";
+import { DocumentViewerPanel } from "./workspace/document-viewer-panel";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
-  filterApiCardFavorites,
   subscribeApiCardFavoriteNotices,
-  useApiCardFavorites,
   type ApiCardFavorite
 } from "./api-card-favorites";
 import {
@@ -241,7 +245,6 @@ import {
   IconCompose,
   IconCopy,
   IconDownload,
-  IconEraser,
   IconEye,
   IconFileChanges,
   IconFolder,
@@ -296,11 +299,11 @@ import { MultimodalPickerDialog } from "./settings/multimodal-picker-dialog";
 import { AppearanceSettingsPage } from "./settings/pages/application/appearance-page";
 import { MultimodalSettingsPage } from "./settings/pages/models/multimodal-page";
 import { ProviderSettingsPage } from "./settings/pages/models/provider-page";
-import { ApiFavoritesPage } from "./settings/pages/knowledge/api-favorites-page";
 import { KnowledgePage } from "./settings/pages/knowledge/knowledge-page";
 import { CloudNotesPage } from "./settings/pages/connections/cloud-notes-page";
 import { MemoryPage } from "./settings/pages/knowledge/memory-page";
 import { ResponseTonePage } from "./settings/pages/general/response-tone-page";
+import { SidebarNavPage } from "./settings/pages/general/sidebar-nav-page";
 import { RuntimeOverviewPage } from "./settings/pages/general/runtime-overview-page";
 import { DatabasePage } from "./settings/pages/connections/database-page";
 import { McpPage } from "./settings/pages/connections/mcp-page";
@@ -313,6 +316,7 @@ import { TerminalPanel } from "./workspace/terminal-panel";
 import { TerminalWorkspace, type TerminalWorkspaceTab } from "./workspace/terminal-workspace";
 import { useTerminalSessions } from "./hooks/use-terminal-sessions";
 import { useQuickNotes } from "./hooks/use-quick-notes";
+import { useDocumentTabs } from "./hooks/use-document-tabs";
 import { useHistorySearch } from "./hooks/use-history-search";
 import { useChatBackground } from "./hooks/use-chat-background";
 import { useRealtimeEnhancement } from "./hooks/use-realtime-enhancement";
@@ -345,7 +349,8 @@ import { RightWorkspacePanel, getDefaultRightWorkspaceTab, isProjectWorkspaceThr
 import { rememberThinkingText, selectThinkingText, type ThinkingMemory } from "./workspace/thinking-state";
 import { NotificationCenter } from "./workspace/notification-center";
 import { HelpSheet } from "./workspace/help-sheet";
-import { QuickNotesSheet } from "./workspace/quick-notes-sheet";
+import { QuickNotesPanel } from "./workspace/quick-notes-panel";
+import { ApiFavoritesInlinePanel } from "./workspace/api-favorites-inline-panel";
 import { ShareBar } from "./workspace/share-bar";
 import type { ShareBarFeedback } from "./workspace/share-bar";
 import { mountShareCard } from "./workspace/share-capture-document";
@@ -384,12 +389,13 @@ import { ComposerSubmissionStatus, GpaConfirmationCard, GpaPlanResumeRetryConfir
 import { PlanTimeline, getRuntimeActivityStartedAt } from "./composer/plan-timeline";
 import { buildConversationTurnItems, ComposerTaskChanges, ConversationTurnRail } from "./timeline/conversation-rail";
 import { TimelineEntries } from "./timeline/timeline-entries";
-import { ApprovalCard, AssistantDraftMessage, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
+import { ApprovalCard, getMessageAttachments, reuseEquivalentRecordArray, UserInputPromptCard, type UserMessageActions } from "./timeline/transcript";
 export { extractMessageMediaReferences } from "./timeline/transcript";
 import {
   HISTORY_EXPANDED_GROUPS_STORAGE_KEY,
   normalizeHistoryGroupKey,
   readStoredStringSet,
+  sortHistoryThreadsByRecentActivity,
   writeStoredStringSet
 } from "./history/history-utils";
 import {
@@ -408,6 +414,12 @@ import {
   type SettingsTab,
 } from "./core/app-types";
 import { RuntimeItemStream, withRuntimeItemDetails, type RuntimeItemStreamEntry } from "./lib/runtime-item-stream";
+import {
+  appendRuntimeOutputBatch,
+  MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS,
+  RUNTIME_ACTIVITY_OUTPUT_BATCH_INTERVAL_MS,
+  type RuntimeActivityOutput
+} from "./core/runtime-activity";
 
 const MAX_RUNTIME_ACTIVITY_ENTRIES = 120;
 
@@ -638,251 +650,7 @@ const SNAPSHOT_SUPERSEDED_RETRY_LIMIT = 3;
  * keeps a pathological server count from turning every refresh into a full read.
  */
 const SNAPSHOT_DELTA_HEAL_LIMIT = 2;
-
-type TranscriptDiagnosticInputs = {
-  threadId: string | null;
-  threadStatus: string | null;
-  isTaskProcessing: boolean;
-  messages: ReadonlyArray<MessageRecord>;
-  entries: ReadonlyArray<{ kind: string; id: string; createdAt: string }>;
-  sections: ReadonlyArray<{
-    id: string;
-    userEntryId: string;
-    summaryEntryId: string | null;
-    entryIds: readonly string[];
-  }>;
-  collapsedTurnIds: ReadonlySet<string>;
-  latestTurnId: string | null;
-};
-
-const transcriptDiagnosticKeys = new Set<string>();
-
-function shortDiagId(value: string | null | undefined): string {
-  return typeof value === "string" ? value.slice(0, 8) : "";
-}
-
-function describeTranscriptMessage(message: MessageRecord) {
-  let displayKind: string | null = null;
-  if (message.metadataJson) {
-    try {
-      displayKind = (JSON.parse(message.metadataJson) as { displayKind?: string }).displayKind ?? null;
-    } catch {
-      displayKind = "PARSE_ERR";
-    }
-  }
-  return {
-    i: shortDiagId(message.id),
-    r: message.role,
-    n: message.content.length,
-    dk: displayKind,
-    tr: shortDiagId(message.turnRunId)
-  };
-}
-
-/**
- * A needle taken from the raw markdown never appears in a text node, because the
- * renderer strips markers like `##` or `**`. Taking the raw prefix therefore
- * reported "not in the DOM" even when the answer was on screen. Take the longest
- * plain-text line instead.
- */
-function extractPlainTextNeedle(signature: string): string {
-  const lines = signature
-    .split(/\r?\n/)
-    .map((line) => line
-      .replace(/^\s*(?:[>#*+\-|]+\s*|\d+[.)]\s*)+/, "")
-      .replace(/[*`_|[\]]/g, "")
-      .trim())
-    .filter((line) => line.length >= 12);
-  const longest = lines.reduce((best, line) => (line.length > best.length ? line : best), "");
-  return longest.slice(0, 16);
-}
-
-function inspectTranscriptDom(signature: string): Record<string, unknown> {
-  const result: Record<string, unknown> = { found: false };
-  try {
-    const scroll = document.querySelector(".chat-scroll") as HTMLElement | null;
-    const cards = Array.from(document.querySelectorAll(".message-card"));
-    result.cards = cards.length;
-    result.cardTexts = cards.map((card) => ({
-      cls: String(card.className ?? "").slice(0, 48),
-      text: (card.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 56)
-    }));
-    if (scroll) {
-      result.scrollTop = Math.round(scroll.scrollTop);
-      result.clientHeight = Math.round(scroll.clientHeight);
-      result.scrollHeight = Math.round(scroll.scrollHeight);
-    }
-    const needle = extractPlainTextNeedle(signature);
-    result.needle = needle;
-    if (!needle) return result;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node = walker.nextNode();
-    let hit: Text | null = null;
-    while (node) {
-      const text = node.nodeValue;
-      if (text && text.includes(needle)) {
-        hit = node as Text;
-        break;
-      }
-      node = walker.nextNode();
-    }
-    if (!hit) return result;
-    result.found = true;
-    const element = hit.parentElement;
-    const card = (element?.closest(".message-card") as HTMLElement | null) ?? element;
-    if (!card) return result;
-    const style = window.getComputedStyle(card);
-    result.opacity = style.opacity;
-    result.visibility = style.visibility;
-    result.display = style.display;
-    result.className = typeof card.className === "string" ? card.className.slice(0, 160) : "";
-    const rect = card.getBoundingClientRect();
-    result.rectTop = Math.round(rect.top);
-    result.rectHeight = Math.round(rect.height);
-    if (scroll) {
-      const scrollRect = scroll.getBoundingClientRect();
-      result.inViewport = rect.bottom > scrollRect.top && rect.top < scrollRect.bottom;
-    }
-  } catch {
-    // Diagnostic only: never affect the app.
-  }
-  return result;
-}
-
-function emitTranscriptDiagnostic(reason: string, delayMs: number, payload: Record<string, unknown>): void {
-  try {
-    console.error(`[transcript-diag] ${JSON.stringify({ reason, delayMs, ...payload })}`);
-  } catch {
-    // Diagnostic only.
-  }
-}
-
-export function scheduleTranscriptDiagnostic(
-  reason: string,
-  threadId: string,
-  messageId: string | null,
-  inputsRef: { current: TranscriptDiagnosticInputs | null }
-): void {
-  const key = `${reason}:${threadId}:${messageId ?? "-"}`;
-  if (transcriptDiagnosticKeys.has(key)) return;
-  if (transcriptDiagnosticKeys.size > 60) transcriptDiagnosticKeys.clear();
-  transcriptDiagnosticKeys.add(key);
-  for (const delayMs of [1400, 5200]) {
-    window.setTimeout(() => {
-      try {
-        const inputs = inputsRef.current;
-        if (!inputs) return;
-        const target = (messageId ? inputs.messages.find((message) => message.id === messageId) : undefined)
-          ?? [...inputs.messages].reverse().find(
-            (message) => message.role === "assistant" && message.content.trim().length > 150
-          );
-        const section = target
-          ? inputs.sections.find((candidate) => candidate.entryIds.some((entryId) => entryId.includes(target.id)))
-          : undefined;
-        const entry = target
-          ? inputs.entries.find((candidate) => candidate.id.includes(target.id))
-          : undefined;
-        emitTranscriptDiagnostic(reason, delayMs, {
-          thread: shortDiagId(threadId),
-          activeThread: shortDiagId(inputs.threadId),
-          status: inputs.threadStatus,
-          processing: inputs.isTaskProcessing,
-          msgCount: inputs.messages.length,
-          entryCount: inputs.entries.length,
-          target: target ? shortDiagId(target.id) : null,
-          targetMessage: target ? describeTranscriptMessage(target) : null,
-          inMessages: Boolean(target),
-          inEntries: Boolean(entry),
-          entryId: entry ? entry.id.slice(0, 24) : null,
-          sectionId: section ? section.id.slice(0, 24) : null,
-          summaryId: section?.summaryEntryId ? section.summaryEntryId.slice(0, 24) : null,
-          summaryIsTarget: Boolean(section?.summaryEntryId && target && section.summaryEntryId.includes(target.id)),
-          sectionEntryCount: section ? section.entryIds.length : null,
-          turnCollapsed: Boolean(section && inputs.collapsedTurnIds.has(section.id)),
-          collapsedCount: inputs.collapsedTurnIds.size,
-          latestTurn: inputs.latestTurnId ? inputs.latestTurnId.slice(0, 16) : null,
-          tailMessages: inputs.messages.slice(-5).map(describeTranscriptMessage),
-          tailEntries: inputs.entries.slice(-6).map((item) => ({
-            k: item.kind,
-            i: item.id.slice(0, 20),
-            c: item.createdAt
-          })),
-          tailSections: inputs.sections.slice(-2).map((item) => ({
-            id: item.id.slice(0, 20),
-            u: item.userEntryId.slice(0, 20),
-            s: item.summaryEntryId ? item.summaryEntryId.slice(0, 20) : null,
-            n: item.entryIds.length
-          })),
-          dom: inspectTranscriptDom(target?.content ?? "")
-        });
-      } catch {
-        // Diagnostic only.
-      }
-    }, delayMs);
-  }
-}
-
-/**
- * A swallowed user message and a send that did nothing look identical on screen,
- * so sample the user's own bubble explicitly: is the optimistic row still pending,
- * did it ever reach the painted set, has a persisted twin arrived, and is the text
- * in the DOM. This is the only signal that separates "never painted" from
- * "painted and then removed".
- */
-export function scheduleUserMessageSendDiagnostic(
-  threadId: string,
-  optimisticId: string,
-  content: string,
-  refs: {
-    inputs: { current: TranscriptDiagnosticInputs | null };
-    live: { current: RuntimeThreadSnapshot | null };
-    pending: { current: Record<string, MessageRecord[]> };
-    rendered: { current: Set<string> };
-  }
-): void {
-  const needle = content.replace(/\s+/g, " ").trim().slice(0, 20);
-  const key = `user.sent:${threadId}:${optimisticId}`;
-  if (transcriptDiagnosticKeys.has(key)) return;
-  if (transcriptDiagnosticKeys.size > 60) transcriptDiagnosticKeys.clear();
-  transcriptDiagnosticKeys.add(key);
-  for (const delayMs of [700, 1400, 5200]) {
-    window.setTimeout(() => {
-      try {
-        const inputs = refs.inputs.current;
-        const live = refs.live.current?.thread.id === threadId ? refs.live.current : null;
-        const twins = (list: ReadonlyArray<MessageRecord>) => list.filter((message) =>
-          message.role === "user"
-          && !message.id.startsWith("optimistic-")
-          && (message.id === optimisticId
-            || (needle.length > 0 && message.content.replace(/\s+/g, " ").trim().slice(0, 20) === needle))
-        );
-        const liveTwins = live ? twins(live.messages) : [];
-        const visibleTwins = inputs ? twins(inputs.messages) : [];
-        emitTranscriptDiagnostic("user.sent", delayMs, {
-          thread: shortDiagId(threadId),
-          activeThread: shortDiagId(inputs?.threadId ?? null),
-          optimisticId: shortDiagId(optimisticId),
-          status: inputs?.threadStatus ?? null,
-          liveCount: live ? live.messages.length : null,
-          msgCount: inputs?.messages.length ?? null,
-          entryCount: inputs?.entries.length ?? null,
-          pendingCount: (refs.pending.current[threadId] ?? []).length,
-          optimisticPending: (refs.pending.current[threadId] ?? []).some((item) => item.id === optimisticId),
-          renderedOptimistic: refs.rendered.current.has(optimisticId),
-          renderedTwin: liveTwins.some((message) => refs.rendered.current.has(message.id)),
-          liveHit: liveTwins.map((message) => shortDiagId(message.id)),
-          visibleHit: visibleTwins.map((message) => shortDiagId(message.id)),
-          entryHit: visibleTwins.map((message) =>
-            inputs?.entries.find((entry) => entry.id.includes(message.id))?.id.slice(0, 24) ?? null
-          ),
-          dom: inspectTranscriptDom(needle)
-        });
-      } catch {
-        // Diagnostic only.
-      }
-    }, delayMs);
-  }
-}
+const ASSISTANT_DRAFT_COMMIT_INTERVAL_MS = 50;
 
 export function App() {
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
@@ -954,9 +722,6 @@ export function App() {
   // reported, used to bound the escalation to a full read (see
   // SNAPSHOT_DELTA_HEAL_LIMIT).
   const snapshotDeltaHealCountRef = useRef<Record<string, number>>({});
-  // TEMPORARY diagnostic: latest render's transcript inputs, read by the runtime
-  // event handler (which runs outside React's render pass).
-  const transcriptDiagnosticInputsRef = useRef<TranscriptDiagnosticInputs | null>(null);
   const latestRuntimeThreadsRef = useRef<Record<string, ThreadRecord>>({});
   const persistedRuntimeMessagesRef = useRef<Record<string, Map<string, MessageRecord>>>({});
   const lastToolTimelineMismatchRef = useRef("");
@@ -1013,7 +778,6 @@ export function App() {
   const filesRoot = workspaceRoots.includes(activeFilesRoot) ? activeFilesRoot : workspaceRoots[0] ?? "";
   const gitRoot = workspaceRoots.includes(activeGitRoot) ? activeGitRoot : workspaceRoots[0] ?? "";
   const terminalRoot = workspaceRoots.includes(activeTerminalRoot) ? activeTerminalRoot : workspaceRoots[0] ?? "";
-  const visibleRightWorkspaceTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab);
   const timelineBuildCacheRef = useRef<TimelineIncrementalCache | null>(null);
   const [isThreadSwitching, setIsThreadSwitching] = useState(false);
   const snapshotThreadIdRef = useRef<string | null>(null);
@@ -1036,21 +800,27 @@ export function App() {
   const thinkingMemoryRef = useRef<ThinkingMemory | null>(null);
   const [browserTabsByThread, setBrowserTabsByThread] = useState<Record<string, RuntimeThreadSnapshot["browserTabs"]>>({});
   const [assistantDrafts, setAssistantDrafts] = useState<Record<string, AssistantDraft>>({});
+  const assistantDraftsRef = useRef<Record<string, AssistantDraft>>({});
+  const pendingAssistantDraftUpdatesRef = useRef<Record<string, AssistantDraft>>({});
+  const assistantDraftCommitTimerRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    assistantDraftsRef.current = assistantDrafts;
+  }, [assistantDrafts]);
   const [finalizingAssistantMessageIds, setFinalizingAssistantMessageIds] = useState<Set<string>>(() => new Set());
   const finalMessageFadeTimersRef = useRef<Record<string, number>>({});
   const [activeToolCall, setActiveToolCall] = useState<ActiveToolCall | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState<RuntimeProgress | null>(null);
   const [composerSubmission, setComposerSubmission] = useState<ComposerSubmission | null>(null);
   const [runtimeActivities, setRuntimeActivities] = useState<Record<string, RuntimeActivity>>({});
+  const runtimeOutputBufferByThreadRef = useRef<Record<string, RuntimeActivityOutput[]>>({});
+  const runtimeOutputFlushTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (runtimeOutputFlushTimerRef.current !== null) {
+      window.clearTimeout(runtimeOutputFlushTimerRef.current);
+    }
+  }, []);
   const [completedTurnTimers, setCompletedTurnTimers] = useState<Record<string, { startedAt: string; completedAt: string }>>({});
   const [input, setInput] = useState("");
-  const apiCardFavorites = useApiCardFavorites();
-  // + 菜单"接口卡片"子菜单搜索
-  const [apiCardMenuQuery, setApiCardMenuQuery] = useState("");
-  const apiCardMenuMatches = useMemo(
-    () => filterApiCardFavorites(apiCardFavorites, apiCardMenuQuery).slice(0, 20),
-    [apiCardFavorites, apiCardMenuQuery]
-  );
   // 收藏/取消收藏时弹出全局提醒
   const { notice, isNoticeHovered, setIsNoticeHovered, exitingNoticeId, showNotice, dismissNotice } = useAppNotice();
   useEffect(() => {
@@ -1107,6 +877,17 @@ export function App() {
     syncToCloud: syncQuickNoteToCloud,
     selectedCloudNoteId: selectedQuickNoteCloudId
   } = quickNotesState;
+  // 接口卡片与随手记并列，同样在聊天区内显示与操作，不再占用设置页。
+  const [isApiFavoritesOpen, setIsApiFavoritesOpen] = useState(false);
+  // 查看文档排在接口卡片下方，同样常驻聊天区，与随手记、接口卡片互斥显示。
+  const [isDocumentViewerOpen, setIsDocumentViewerOpen] = useState(false);
+  // 页签集合挂在 App 而不是面板内部：切去看任务时面板只是让出聊天区，
+  // 面板卸载后已经打开的文档仍留在这一层，再点入口就能接着看。
+  const documentTabs = useDocumentTabs(() => setIsDocumentViewerOpen(false));
+  // Esc 与侧栏再次点击都从这里收面板，未保存的页签仍会先走确认。
+  const requestDocumentViewerClose = useStableEvent(() => {
+    documentTabs.requestClosePanel();
+  });
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const historySearch = useHistorySearch(showNotice);
   const {
@@ -1148,7 +929,7 @@ export function App() {
   const [multiAgentMode, setMultiAgentMode] = useState<MultiAgentMode>("proactive");
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [gpaMenuOpen, setGpaMenuOpen] = useState(false);
-  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database" | "apiCards">("root");
+  const [composerAddMenuView, setComposerAddMenuView] = useState<"root" | "skills" | "mcp" | "database">("root");
   const [skillsMenuQuery, setSkillsMenuQuery] = useState("");
   const [composerAddSubmenuAnchor, setComposerAddSubmenuAnchor] = useState<HTMLElement | null>(null);
   const [gpaMenuPos, setGpaMenuPos] = useState<{ left: number; top: number } | null>(null);
@@ -1402,6 +1183,20 @@ export function App() {
   const [newTaskBranchSummary, setNewTaskBranchSummary] = useState<GitBranchSummary | null>(null);
   const [newTaskBranchLoading, setNewTaskBranchLoading] = useState(false);
   const [isPickingNewTaskFolder, setIsPickingNewTaskFolder] = useState(false);
+  // 新建任务页还没有线程：只要用户选好了文件夹，右侧就和 project 会话一样
+  // 以该文件夹为作用域加载文件夹树与 Git，而不是停在固定的空态。
+  const newTaskFolderCwd =
+    isNewTaskComposerOpen && newTaskWorkspace.kind === "folder" ? newTaskWorkspace.cwd : null;
+  const rightWorkspaceActive = Boolean(selectedThreadId)
+    ? isProjectWorkspaceThread(selectedThread?.mode)
+    : Boolean(newTaskFolderCwd);
+  const workspaceScopeCwd = selectedThreadId ? filesRoot : newTaskFolderCwd ?? "";
+  const rightWorkspaceRoots = selectedThreadId ? workspaceRoots : newTaskFolderCwd ? [newTaskFolderCwd] : [];
+  const visibleRightWorkspaceTab = resolveRightWorkspaceTabForMode(
+    selectedThread?.mode,
+    rightWorkspaceTab,
+    rightWorkspaceActive
+  );
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [projectEditDraft, setProjectEditDraft] = useState<{ cwd: string; workspaceRoots: string[] } | null>(null);
@@ -1514,8 +1309,6 @@ export function App() {
   const [historyBatchDeleteConfirmation, setHistoryBatchDeleteConfirmation] = useState<string[] | null>(null);
   const [deletingHistoryBatch, setDeletingHistoryBatch] = useState(false);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
-  const [isClearChatConfirmOpen, setIsClearChatConfirmOpen] = useState(false);
-  const [isClearingChat, setIsClearingChat] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatTranscriptRef = useRef<HTMLDivElement | null>(null);
@@ -1535,6 +1328,11 @@ export function App() {
   }, []);
 
   useEffect(() => () => {
+    if (assistantDraftCommitTimerRef.current !== null) {
+      window.clearTimeout(assistantDraftCommitTimerRef.current);
+      assistantDraftCommitTimerRef.current = null;
+    }
+    pendingAssistantDraftUpdatesRef.current = {};
     assistantDraftBuffersRef.current = {};
     assistantDraftReasoningBuffersRef.current = {};
     assistantDraftThreadIdsRef.current = {};
@@ -1857,11 +1655,18 @@ export function App() {
         ? mergeSnapshotRecords(snapshotMessages, runtimeMessages, (message) => message.createdAt)
         : snapshotMessages
     );
+    const cachedToolCalls = snapshotCacheByThreadRef.current.get(threadId)?.toolCalls ?? [];
+    const toolCalls = mergeRuntimeToolCallSummaries(nextSnapshot.toolCalls, cachedToolCalls);
     const messageCount = Math.max(nextSnapshot.messageCount, messages.length);
-    if (thread === nextSnapshot.thread && messages === nextSnapshot.messages && messageCount === nextSnapshot.messageCount) {
+    if (
+      thread === nextSnapshot.thread &&
+      messages === nextSnapshot.messages &&
+      toolCalls === nextSnapshot.toolCalls &&
+      messageCount === nextSnapshot.messageCount
+    ) {
       return nextSnapshot;
     }
-    return { ...nextSnapshot, thread, messages, messageCount };
+    return { ...nextSnapshot, thread, messages, toolCalls, messageCount };
   }
 
   function reconcileCachedAndSelectedSnapshot(
@@ -1962,10 +1767,34 @@ export function App() {
       : null;
   const projectToolCalls = snapshot?.thread.id === selectedThreadId ? snapshot.toolCalls : [];
 
+  function commitPendingAssistantDraftUpdates() {
+    if (assistantDraftCommitTimerRef.current !== null) {
+      window.clearTimeout(assistantDraftCommitTimerRef.current);
+      assistantDraftCommitTimerRef.current = null;
+    }
+    const pending = pendingAssistantDraftUpdatesRef.current;
+    pendingAssistantDraftUpdatesRef.current = {};
+    if (Object.keys(pending).length === 0) return;
+    setAssistantDrafts((current) => {
+      const next = applyAssistantDraftUpdateBatch(current, Object.values(pending));
+      assistantDraftsRef.current = next;
+      return next;
+    });
+  }
+
+  function scheduleAssistantDraftCommit(draft: AssistantDraft) {
+    pendingAssistantDraftUpdatesRef.current[draft.draftId] = draft;
+    if (assistantDraftCommitTimerRef.current !== null) return;
+    assistantDraftCommitTimerRef.current = window.setTimeout(() => {
+      commitPendingAssistantDraftUpdates();
+    }, ASSISTANT_DRAFT_COMMIT_INTERVAL_MS);
+  }
+
   function flushAssistantDraft(draftId: string) {
     delete assistantDraftBuffersRef.current[draftId];
     delete assistantDraftReasoningBuffersRef.current[draftId];
     delete assistantDraftThreadIdsRef.current[draftId];
+    delete pendingAssistantDraftUpdatesRef.current[draftId];
   }
 
   function discardQueuedAssistantDraft(draftId: string) {
@@ -2062,6 +1891,7 @@ export function App() {
   }, [gpaMenuOpen]);
 
   function startRuntimeActivity(threadId: string) {
+    flushRuntimeOutput(threadId);
     const createdAt = new Date().toISOString();
     setCompletedTurnTimers((current) => {
       if (!current[threadId]) return current;
@@ -2082,6 +1912,7 @@ export function App() {
   }
 
   function appendRuntimeStatus(threadId: string, label: string, createdAt = new Date().toISOString()) {
+    flushRuntimeOutput(threadId);
     // Keep child activity while its root task is selected so subagent cards can
     // distinguish startup, model wait, shell progress, and watchdog outcomes.
     setRuntimeActivities((current) => {
@@ -2102,29 +1933,63 @@ export function App() {
     });
   }
 
+  function flushRuntimeOutput(threadId?: string) {
+    const buffers = runtimeOutputBufferByThreadRef.current;
+    const pendingByThread: Record<string, RuntimeActivityOutput[]> = {};
+    if (threadId) {
+      const pending = buffers[threadId];
+      if (pending?.length) pendingByThread[threadId] = pending;
+      delete buffers[threadId];
+    } else {
+      Object.assign(pendingByThread, buffers);
+      runtimeOutputBufferByThreadRef.current = {};
+    }
+
+    if (Object.keys(runtimeOutputBufferByThreadRef.current).length === 0 && runtimeOutputFlushTimerRef.current !== null) {
+      window.clearTimeout(runtimeOutputFlushTimerRef.current);
+      runtimeOutputFlushTimerRef.current = null;
+    }
+    if (Object.keys(pendingByThread).length === 0) return;
+
+    setRuntimeActivities((current) => {
+      let next = current;
+      for (const [pendingThreadId, outputs] of Object.entries(pendingByThread)) {
+        const activity = appendRuntimeOutputBatch(next[pendingThreadId], pendingThreadId, outputs);
+        if (next === current) next = { ...current };
+        next[pendingThreadId] = {
+          ...activity,
+          entries: trimRuntimeActivityEntries(activity.entries)
+        };
+      }
+      return next;
+    });
+  }
+
   function appendRuntimeOutput(
     threadId: string,
     label: string,
     content: string,
     createdAt = new Date().toISOString()
   ) {
-    setRuntimeActivities((current) => {
-      const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
-      return {
-        ...current,
-        [threadId]: {
-          ...activity,
-          startedAt: activity.startedAt ?? createdAt,
-          entries: trimRuntimeActivityEntries([
-            ...activity.entries,
-            { id: `output-${createdAt}`, kind: "output", label, content, createdAt }
-          ])
-        }
-      };
-    });
+    const buffers = runtimeOutputBufferByThreadRef.current;
+    const pending = buffers[threadId] ?? (buffers[threadId] = []);
+    const boundedContent = content.slice(-MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS);
+    const last = pending.at(-1);
+    if (last?.label === label) {
+      last.content = `${last.content}${boundedContent}`.slice(-MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS);
+    } else {
+      pending.push({ id: `output-${createdAt}`, kind: "output", label, content: boundedContent, createdAt });
+    }
+    if (runtimeOutputFlushTimerRef.current === null) {
+      runtimeOutputFlushTimerRef.current = window.setTimeout(() => {
+        runtimeOutputFlushTimerRef.current = null;
+        flushRuntimeOutput();
+      }, RUNTIME_ACTIVITY_OUTPUT_BATCH_INTERVAL_MS);
+    }
   }
 
   function upsertRuntimeTool(threadId: string, toolCall: ToolCallRecord) {
+    flushRuntimeOutput(threadId);
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? {
         threadId,
@@ -2158,6 +2023,7 @@ export function App() {
     resultSize: number,
     hasFullResult: boolean
   ) {
+    flushRuntimeOutput(threadId);
     setRuntimeActivities((current) => {
       const activity = current[threadId];
       if (!activity) return current;
@@ -2175,6 +2041,7 @@ export function App() {
   }
 
   function appendRuntimeDecisionStatusAfterTool(threadId: string, createdAt = new Date().toISOString()) {
+    flushRuntimeOutput(threadId);
     setRuntimeActivities((current) => {
       const activity = current[threadId] ?? { threadId, startedAt: createdAt, entries: [] };
       const completedTools = activity.entries
@@ -2199,6 +2066,7 @@ export function App() {
   }
 
   function clearRuntimeActivity(threadId: string) {
+    flushRuntimeOutput(threadId);
     let captured: RuntimeActivity | undefined;
     setRuntimeActivities((current) => {
       captured = current[threadId];
@@ -2398,6 +2266,7 @@ export function App() {
         return;
       }
       if (typed.type === "gpa.updated" && typed.payload?.gpa) {
+        const gpaUpdate = typed.payload.gpa;
         if (typed.threadId) {
           const gpaThreadId = typed.threadId;
           // GPA access flags are durable thread preferences. Commit them to
@@ -2406,27 +2275,27 @@ export function App() {
           invalidateSnapshotRequest(gpaThreadId);
           const cached = snapshotCacheByThreadRef.current.get(gpaThreadId);
           if (cached) {
-            cacheThreadSnapshot(replaceThreadSnapshotGpa(cached, gpaThreadId, typed.payload.gpa) ?? cached);
+            cacheThreadSnapshot(replaceThreadSnapshotGpa(cached, gpaThreadId, gpaUpdate) ?? cached);
           }
-          setSnapshot((current) => replaceThreadSnapshotGpa(current, gpaThreadId, typed.payload.gpa));
+          setSnapshot((current) => replaceThreadSnapshotGpa(current, gpaThreadId, gpaUpdate));
         }
         if (typed.threadId === currentSelectedThreadId) {
           if (
             gpaConfirmationPendingStageRef.current &&
-            typed.payload.gpa.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
+            gpaUpdate.awaitingConfirmation !== gpaConfirmationPendingStageRef.current
           ) {
             gpaConfirmationPendingStageRef.current = null;
             setGpaConfirmationSubmitting(false);
           }
           const currentThreadMode = threadsRef.current.find((thread) => thread.id === currentSelectedThreadId)?.mode ?? "project";
-          const gpa = normalizeGpaStateForThread(currentThreadMode, typed.payload.gpa);
+          const gpa = normalizeGpaStateForThread(currentThreadMode, gpaUpdate);
           setGpaState(gpa);
           setGpaComposerSelected(gpa.stage !== "off");
         }
-        if (notificationThreadId && typed.payload.gpa.awaitingConfirmation) {
+        if (notificationThreadId && gpaUpdate.awaitingConfirmation) {
           setThreadNotificationAttention(
             notificationThreadId,
-            typed.payload.gpa.awaitingConfirmation === "goal" ? "需要确认任务目标。" : "需要确认 GPA 计划后继续。",
+            gpaUpdate.awaitingConfirmation === "goal" ? "需要确认任务目标。" : "需要确认 GPA 计划后继续。",
             "gpa",
             undefined,
             typed.createdAt
@@ -2606,6 +2475,15 @@ export function App() {
           typed.threadId,
           (toolCalls) => upsertRuntimeToolCallSummary(toolCalls, startedToolForActivity)
         );
+        if (shouldRefreshSelectedSnapshotForToolEvent(
+          selectedThreadIdRef.current,
+          typed.threadId,
+          snapshotCacheByThreadRef.current.has(typed.threadId),
+          snapshotThreadIdRef.current,
+          Boolean(snapshotRefreshInFlightRef.current[typed.threadId])
+        )) {
+          scheduleRuntimeRefresh(typed.threadId, notificationThreadId);
+        }
         if (typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
             updateThreadNotification(
@@ -2692,6 +2570,15 @@ export function App() {
             hasFullResult,
             completedAt
           }));
+          if (shouldRefreshSelectedSnapshotForToolEvent(
+            selectedThreadIdRef.current,
+            typed.threadId,
+            snapshotCacheByThreadRef.current.has(typed.threadId),
+            snapshotThreadIdRef.current,
+            Boolean(snapshotRefreshInFlightRef.current[typed.threadId])
+          )) {
+            scheduleRuntimeRefresh(typed.threadId, notificationThreadId);
+          }
         }
         if (typed.threadId && typed.threadId !== selectedThreadIdRef.current) {
           if (notificationThreadId) {
@@ -2801,24 +2688,25 @@ export function App() {
         if (reasoningUpdate?.buffer) assistantDraftReasoningBuffersRef.current[draftId] = reasoningUpdate.buffer;
         else if (reasoningUpdate) delete assistantDraftReasoningBuffersRef.current[draftId];
         if (!streamUpdate && !reasoningUpdate) return;
-        setAssistantDrafts((current) => {
-          const previous = current[draftId];
-          const next = {
-            draftId,
-            sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
-            threadId,
-            turnRunId,
-            content: streamUpdate?.content ?? previous?.content ?? "",
-            deltaSequence,
-            reasoning: reasoningUpdate?.reasoning ?? previous?.reasoning,
-            reasoningDeltaSequence,
-            phase,
-            startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
-            completed: false
-          };
-          assistantDraftThreadIdsRef.current[draftId] = threadId;
-          return reconcileAssistantDraftUpdate(current, next);
-        });
+        const previous = pendingAssistantDraftUpdatesRef.current[draftId] ?? assistantDraftsRef.current[draftId];
+        const next = {
+          draftId,
+          sequence: typeof payload.sequence === "number" ? payload.sequence : 0,
+          threadId,
+          turnRunId,
+          content: streamUpdate?.content ?? previous?.content ?? "",
+          deltaSequence,
+          reasoning: reasoningUpdate?.reasoning ?? previous?.reasoning,
+          reasoningDeltaSequence,
+          phase,
+          startedAt: typeof payload.startedAt === "string" ? payload.startedAt : typed.createdAt ?? new Date().toISOString(),
+          completed: false
+        };
+        assistantDraftThreadIdsRef.current[draftId] = threadId;
+        // Draft deltas can arrive many times per frame. Commit at most once per
+        // 50 ms so the entire app is not reconciled for every token while a long
+        // answer is streaming.
+        scheduleAssistantDraftCommit(next);
         // Returning the previous object keeps React from re-rendering on every
         // streamed frame, but the comparison now includes `draftPhase`: otherwise
         // a turn that moves from generating to validating/auditing/retrying keeps
@@ -3077,6 +2965,7 @@ export function App() {
         typed.threadId &&
         (typed.payload?.message?.role === "user" || typed.payload?.message?.role === "assistant")
       ) {
+        flushRuntimeOutput(typed.threadId);
         // A queued user message may be persisted after the optimistic bubble is
         // intentionally omitted. Merge the runtime event immediately; waiting
         // for the next snapshot refresh leaves a blank transcript until reload.
@@ -3112,19 +3001,6 @@ export function App() {
           consumedOptimisticIds,
           commitImmediately
         );
-        emitTranscriptDiagnostic("message.created", 0, {
-          thr: shortDiagId(runtimeThreadId),
-          id: shortDiagId(message.id),
-          role: message.role,
-          n: message.content.length,
-          dk: getMessageDisplayKind(message),
-          commitImmediately,
-          refSize: persistedRuntimeMessagesRef.current[runtimeThreadId]?.size ?? 0,
-          snapLen:
-            snapshotRef.current?.thread.id === runtimeThreadId
-              ? snapshotRef.current.messages.length
-              : null
-        });
       }
       if (
         typed.type === "message.created" &&
@@ -3219,7 +3095,6 @@ export function App() {
         // so it is queued without an optimistic message bubble until restart.
         pendingRuntimeStartsRef.current.delete(runtimeThreadId);
         if (status !== "running" && status !== "waiting") {
-          scheduleTranscriptDiagnostic("thread.terminal", runtimeThreadId, null, transcriptDiagnosticInputsRef);
           discardQueuedAssistantDraftsForThread(runtimeThreadId);
           setAssistantDrafts((current) => {
             const remaining = Object.entries(current).filter(([, entry]) =>
@@ -3244,6 +3119,9 @@ export function App() {
         }
       }
       if (typed.type === "assistant.completed" && typed.payload?.turnRunId) {
+        // Do not let the final streamed text sit in the batching queue after
+        // its completion event; completion/reconciliation must follow it.
+        commitPendingAssistantDraftUpdates();
         const { turnRunId, draftId, messageId, discarded } = typed.payload;
         const suppressed = !!typed.threadId && suppressRuntimeProgressRef.current[typed.threadId];
         if (typeof draftId === "string") {
@@ -3260,14 +3138,6 @@ export function App() {
           discarded: discarded === true,
           suppressed
         }));
-        if (discarded !== true && typeof messageId === "string" && typed.threadId) {
-          scheduleTranscriptDiagnostic(
-            "assistant.completed",
-            typed.threadId,
-            messageId,
-            transcriptDiagnosticInputsRef
-          );
-        }
       }
       if (typed.type === "turn.usage" && typed.threadId) {
         if (currentSelectedThreadId && notificationThreadId === currentSelectedThreadId) {
@@ -3335,15 +3205,15 @@ export function App() {
   }, [activeTerminalSession?.output]);
 
   useEffect(() => {
-    const nextTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab);
+    const nextTab = resolveRightWorkspaceTabForMode(selectedThread?.mode, rightWorkspaceTab, rightWorkspaceActive);
     if (nextTab !== rightWorkspaceTab) {
       setRightWorkspaceTab(nextTab);
       setRightWorkspaceExpandedTab(nextTab);
     }
-  }, [rightWorkspaceTab, selectedThread?.mode]);
+  }, [rightWorkspaceActive, rightWorkspaceTab, selectedThread?.mode]);
 
   useEffect(() => {
-    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "files") || !selectedThreadId || !filesRoot) {
+    if (!shouldLoadProjectWorkspaceResource(selectedThread?.mode, isRightWorkspaceOpen, rightWorkspaceTab, "files", rightWorkspaceActive) || !workspaceScopeCwd) {
       setIsProjectFilesLoading(false);
       return;
     }
@@ -3354,16 +3224,20 @@ export function App() {
     setProjectFilesRevision(revision);
     setProjectFiles([]);
     setIsProjectFilesLoading(true);
-    void window.codexh.listProjectFiles({ threadId: selectedThreadId, rootPath: filesRoot, relativeDirectory: "" }).then((entries) => {
+    const scopeCwd = workspaceScopeCwd;
+    void (selectedThreadId
+      ? window.codexh.listProjectFiles({ threadId: selectedThreadId, rootPath: filesRoot, relativeDirectory: "" })
+      : window.codexh.listProjectFilesByPath({ cwd: scopeCwd, relativeDirectory: "" })
+    ).then((entries) => {
       if (cancelled || selectedThreadIdRef.current !== selectedThreadId) {
         return;
       }
       setProjectFiles(entries);
-      reconcileSelectedFile(selectedThreadId, filesRoot, entries);
+      if (selectedThreadId) reconcileSelectedFile(selectedThreadId, filesRoot, entries);
     }).catch(() => {
       if (!cancelled) {
         setProjectFiles([]);
-        clearSelectedFile(selectedThreadId, filesRoot);
+        if (selectedThreadId) clearSelectedFile(selectedThreadId, filesRoot);
       }
     }).finally(() => {
       if (!cancelled) {
@@ -3374,14 +3248,17 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
+  }, [clearSelectedFile, filesRoot, isRightWorkspaceOpen, reconcileSelectedFile, rightWorkspaceActive, rightWorkspaceTab, selectedThread?.mode, selectedThreadId, workspaceScopeCwd]);
 
   const loadProjectDirectory = useCallback(async (relativeDirectory: string): Promise<boolean> => {
     const threadId = selectedThreadId;
+    const scopeCwd = workspaceScopeCwd;
     const revision = projectFilesRevisionRef.current;
-    if (!threadId) return false;
+    if (!threadId && !scopeCwd) return false;
     try {
-      const entries = await window.codexh.listProjectFiles({ threadId, rootPath: filesRoot, relativeDirectory });
+      const entries = threadId
+        ? await window.codexh.listProjectFiles({ threadId, rootPath: filesRoot, relativeDirectory })
+        : await window.codexh.listProjectFilesByPath({ cwd: scopeCwd, relativeDirectory });
       if (selectedThreadIdRef.current !== threadId || projectFilesRevisionRef.current !== revision) {
         return false;
       }
@@ -3391,23 +3268,26 @@ export function App() {
       showNotice("无法读取文件夹", { message: error instanceof Error ? error.message : String(error) });
       return false;
     }
-  }, [filesRoot, selectedThreadId, showNotice]);
+  }, [filesRoot, selectedThreadId, showNotice, workspaceScopeCwd]);
 
   useEffect(() => {
     // 分支徽标与文件变更标记在右侧面板之外读取同一份 git 快照：
     // 选中项目会话就刷新，不能要求 Git 面板处于打开状态。
-    if (!isProjectWorkspaceThread(selectedThread?.mode) || !selectedThreadId || !gitRoot) {
+    if ((!isProjectWorkspaceThread(selectedThread?.mode) && !rightWorkspaceActive) || !workspaceScopeCwd) {
       setGitLoading(false);
       return;
     }
     let cancelled = false;
-    const snapshotKey = `${selectedThreadId}:${gitRoot}`;
+    const snapshotKey = `${selectedThreadId ?? "new-task"}:${selectedThreadId ? gitRoot : workspaceScopeCwd}`;
     // 同一会话刷新时保留旧快照，避免徽标在例行刷新期间闪现空档。
     setGitSnapshotThreadId((current) => (current === snapshotKey ? current : null));
     setGitActionMessage(null);
     const timer = window.setTimeout(() => {
       setGitLoading(true);
-      void window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot }).then((next) => {
+      const gitSnapshotRequest = selectedThreadId
+        ? window.codexh.getGitSnapshot({ threadId: selectedThreadId, rootPath: gitRoot })
+        : window.codexh.getGitSnapshotByPath({ cwd: workspaceScopeCwd });
+      void gitSnapshotRequest.then((next) => {
         if (!cancelled && selectedThreadIdRef.current === selectedThreadId) {
           setGitSnapshot(next as GitSnapshot);
           setGitSnapshotThreadId(snapshotKey);
@@ -3433,7 +3313,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [gitRefreshRevision, gitRoot, isRightWorkspaceOpen, rightWorkspaceTab, selectedThread?.mode, selectedThreadId]);
+  }, [gitRefreshRevision, gitRoot, isRightWorkspaceOpen, rightWorkspaceActive, rightWorkspaceTab, selectedThread?.mode, selectedThreadId, workspaceScopeCwd]);
 
   // Share mode is a transcript selection state, not a dialog: the composer is
   // replaced by the share bar and each message grows a tick box.
@@ -3446,7 +3326,7 @@ export function App() {
   const [shareFeedback, setShareFeedback] = useState<ShareBarFeedback>(null);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearChatConfirmOpen && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !isApiFavoritesOpen && !isDocumentViewerOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
       return;
     }
 
@@ -3477,6 +3357,16 @@ export function App() {
           return;
         }
 
+        if (isApiFavoritesOpen) {
+          setIsApiFavoritesOpen(false);
+          return;
+        }
+
+        if (isDocumentViewerOpen) {
+          requestDocumentViewerClose();
+          return;
+        }
+
         if (isSharing && shareBusyChannel === null && !shareGenerating) {
           setIsSharing(false);
           return;
@@ -3484,11 +3374,6 @@ export function App() {
 
         if (isHelpOpen) {
           setIsHelpOpen(false);
-          return;
-        }
-
-        if (isClearChatConfirmOpen && !isClearingChat) {
-          setIsClearChatConfirmOpen(false);
           return;
         }
 
@@ -3548,7 +3433,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isClearChatConfirmOpen, isClearingChat, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, isSharing, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, shareBusyChannel, shareGenerating, updateConfirmDialog]);
+  }, [deletingHistoryBatch, deletingThreadId, filePreviewPath, gpaPlanResumeBusy, gpaPlanResumeDialog, historyBatchDeleteConfirmation, historyThreadDeleteConfirmation, isApiFavoritesOpen, isDocumentViewerOpen, isClearErrorSolutionsConfirmOpen, isClearingErrorSolutions, isClearSelfImprovementConfirmOpen, isClearingSelfImprovement, isClearLogsConfirmOpen, isClearingLogs, isHelpOpen, isProjectCreateOpen, isPickingProjectEditFolder, isQuickNotesOpen, isRemovingProject, isSavingProjectEdit, isSharing, notice, projectEditDraft, projectRemovalTarget, quickNoteDeleteConfirm, quickNoteListMenu, shareBusyChannel, shareGenerating, updateConfirmDialog]);
 
   useLayoutEffect(() => {
     snapshotThreadIdRef.current = snapshot?.thread.id ?? null;
@@ -3786,10 +3671,9 @@ export function App() {
     () => filterTranscriptMessages(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
   );
-  // The running turn's process notes ("过程记录") render in the thinking workspace
-  // instead of the transcript (see filterTranscriptMessages): they are provisional
-  // until the turn freezes, so painting them as history only made the conversation
-  // grow mid-run and snap back the moment the answer landed.
+  // Commentary process notes and the streaming answer draft stay in the thinking
+  // workspace; settled replies stay in the transcript, and tool activity folds away
+  // together with its turn once the turn collapses.
   const thinkingNotes = useMemo(
     () => selectActiveTurnProcessNotes(selectedMessages, activeSnapshotThreadStatus),
     [activeSnapshotThreadStatus, selectedMessages]
@@ -3853,22 +3737,6 @@ export function App() {
       };
     });
   }, [snapshotThreadKey, selectedMessages]);
-  // TEMPORARY diagnostic: log every change in the transcript's shape so a commit
-  // that drops rows is visible in the runtime log.
-  const transcriptShapeDiagRef = useRef<string>("");
-  useLayoutEffect(() => {
-    const shape = `${snapshotThreadKey ?? "-"}:${selectedMessages.length}:${visibleMessages.length}`;
-    if (transcriptShapeDiagRef.current === shape) return;
-    transcriptShapeDiagRef.current = shape;
-    emitTranscriptDiagnostic("transcript.shape", 0, {
-      thread: shortDiagId(snapshotThreadKey),
-      stateCount: selectedMessages.length,
-      cacheCount: snapshotCacheByThreadRef.current.get(snapshotThreadKey ?? "")?.messages.length ?? -1,
-      visibleCount: visibleMessages.length,
-      optimisticCount: selectedMessages.filter((message) => message.id.startsWith("optimistic-")).length,
-      tail: selectedMessages.slice(-4).map((message) => `${shortDiagId(message.id)}:${message.role}`)
-    });
-  }, [selectedMessages, snapshotThreadKey, visibleMessages]);
   const gpaPlanMessageId = useMemo(
     () => getGpaPlanMessageId(visibleMessages, gpaState),
     [gpaState, visibleMessages]
@@ -4003,7 +3871,11 @@ export function App() {
       );
   }, [currentTaskTurnRunId, snapshotWorkspaceRoot, snapshot?.toolCalls]);
   // Do not keep "执行中" alive from stale runtimeProgress after stop/complete.
-  const isTaskProcessing = shouldShowTaskProcessing(selectedThreadStatus, isPreparingRuntime);
+  const isTaskProcessing = shouldShowTaskProcessing(
+    selectedThreadStatus,
+    isPreparingRuntime,
+    Boolean(localRuntimeProgress?.runtimeObserved)
+  );
 
   // Reasoning used to stream at the tail of the chat transcript, where every frame
   // changed the conversation height and made the whole chat jump up and down. It now
@@ -4016,8 +3888,17 @@ export function App() {
     activeAssistantDraft?.reasoning
   );
   const thinkingText = selectThinkingText(thinkingMemoryRef.current, activeSnapshotThreadId ?? selectedThreadId);
+  const draftStreaming = Boolean(
+    isTaskProcessing &&
+    activeAssistantDraft &&
+    !activeAssistantDraft.completed &&
+    activeAssistantDraft.phase === "generating" &&
+    activeDraftContent.trim()
+  );
   const thinkingStreaming = Boolean(
-    isTaskProcessing && !activeAssistantDraft?.completed && activeAssistantDraft?.reasoning?.trim()
+    isTaskProcessing &&
+    !activeAssistantDraft?.completed &&
+    (activeAssistantDraft?.reasoning?.trim() || draftStreaming)
   );
   const workspaceSubagentPresentations = useMemo(
     () => isTaskProcessing ? subagentPresentations : [],
@@ -4157,16 +4038,6 @@ export function App() {
   }, [activeSnapshotThreadId, isTaskProcessing, latestConversationTurn?.id]);
   // TEMPORARY diagnostic: expose this render's transcript inputs to the runtime
   // event handler through a ref.
-  transcriptDiagnosticInputsRef.current = {
-    threadId: activeSnapshotThreadId,
-    threadStatus: activeSnapshotThreadStatus,
-    isTaskProcessing,
-    messages: visibleMessages,
-    entries: timelineEntries,
-    sections: conversationTurnSections,
-    collapsedTurnIds,
-    latestTurnId: latestConversationTurn?.id ?? null
-  };
   const latestRootRuntimeTool = useMemo(
     () => [...(activeRuntimeActivity?.entries ?? [])].reverse().find(
       (entry): entry is Extract<RuntimeActivityEntry, { kind: "tool" }> => entry.kind === "tool"
@@ -4510,6 +4381,15 @@ export function App() {
     return targetModel.displayName?.trim() || targetModel.id;
   }, [config, composerModelId, composerProviderId, selectedThread]);
   const activeContextCompaction = snapshot?.contextCompaction ?? null;
+  const contextUsageHistory = useMemo(() => buildContextUsageHistory(
+    selectedMessages,
+    snapshot?.toolCalls ?? [],
+    activeContextCompaction
+  ), [activeContextCompaction, selectedMessages, snapshot?.toolCalls]);
+  const formattedComposerAttachments = useMemo(
+    () => formatComposerAttachments(composerAttachments),
+    [composerAttachments]
+  );
   const contextUsage = useMemo(() => {
     const targetProviderId = selectedThread?.providerId ?? composerProviderId ?? config?.defaultProvider;
     const targetModelId = selectedThread?.modelId ?? composerModelId ?? config?.defaultModel;
@@ -4527,11 +4407,12 @@ export function App() {
       gpaStage: gpaState.stage,
       selectedSkillCount: selectedThread?.selectedSkillIds.length ?? 0,
       mcpServerCount: config?.mcpServers.length ?? 0,
-      pendingInput: `${input}\n${formatComposerAttachments(composerAttachments)}`,
+      pendingInput: `${input}\n${formattedComposerAttachments}`,
+      history: contextUsageHistory,
       compaction: activeContextCompaction,
       measurement: matchingMeasurement
     });
-  }, [activeContextCompaction, composerAttachments, composerModelId, composerProviderId, config, gpaState.stage, input, selectedMessages, selectedThread, snapshot?.contextMeasurement, snapshot?.toolCalls]);
+  }, [activeContextCompaction, composerModelId, composerProviderId, config, contextUsageHistory, formattedComposerAttachments, gpaState.stage, input, selectedThread, snapshot?.contextMeasurement]);
 
   // Timestamp of the previous follow frame and of the last follow request. The pair lets
   // the loop derive a per-frame delta (so speed is time-based, not frame-based) and decide
@@ -5094,7 +4975,7 @@ export function App() {
       // calls across both delta and full reads: a partial/stale full response must
       // not make completed tools disappear until the next reload.
       const toolCalls = base
-        ? mergeSnapshotRecords(base.toolCalls, next.toolCalls, (toolCall) => toolCall.startedAt)
+        ? mergeRuntimeToolCallSummaries(base.toolCalls, next.toolCalls)
         : next.toolCalls;
       const artifacts = next.snapshotMode === "delta" && base
         ? mergeSnapshotRecords(base.artifacts, next.artifacts, (artifact) => artifact.createdAt, "descending")
@@ -5119,11 +5000,6 @@ export function App() {
         approvals: base ? reuseEquivalentRecordArray(base.approvals, next.approvals) : next.approvals,
         prompts: base ? reuseEquivalentRecordArray(base.prompts, next.prompts) : next.prompts
       });
-      const baseToolCallIds = new Set((base?.toolCalls ?? []).map((toolCall) => toolCall.id));
-      const hasNewToolCalls = mergedSnapshot.toolCalls.some((toolCall) => !baseToolCallIds.has(toolCall.id));
-      const fullSnapshotMissingToolCallIds = next.snapshotMode === "full" && base
-        ? collectMissingSnapshotRecords(next.toolCalls, base.toolCalls).map((toolCall) => toolCall.id)
-        : [];
       // Compare against what the transcript actually painted rather than against
       // the live state. The final answer can already sit in `snapshot` while the
       // commit that carried it never reached the screen (it was a low-priority
@@ -5147,6 +5023,15 @@ export function App() {
       const hasNewMessages = [...expectedMessageIds].some(
         (messageId) => !renderedMessageIds.has(messageId)
       );
+      const renderedToolCalls = liveSnapshot?.toolCalls ?? base?.toolCalls ?? [];
+      const renderedToolCallsById = new Map(renderedToolCalls.map((toolCall) => [toolCall.id, toolCall]));
+      const hasNewToolCalls = mergedSnapshot.toolCalls.some((toolCall) => {
+        const previous = renderedToolCallsById.get(toolCall.id);
+        return !previous ||
+          previous.status !== toolCall.status ||
+          previous.resultJson !== toolCall.resultJson ||
+          previous.completedAt !== toolCall.completedAt;
+      });
       const reachedTerminalState = Boolean(
         liveSnapshot &&
         isThreadExecutionInProgress(liveSnapshot.thread.status) &&
@@ -5170,6 +5055,14 @@ export function App() {
             if (!current || current.thread.id !== threadId) return reconciled;
             return {
               ...reconciled,
+            // A tool event can land after this read passed its request-id check
+            // but before React replays this transition updater. Preserve the
+            // live/cache state so the captured snapshot cannot roll it back.
+            toolCalls: mergeRuntimeToolCallSummaries(
+              reconciled.toolCalls,
+              current.toolCalls,
+              snapshotCacheByThreadRef.current.get(threadId)?.toolCalls ?? []
+            ),
               messages: mergeMessagesAfterOptimisticUserEdit(
                 current.messages,
                 reconciled.messages,
@@ -5222,10 +5115,7 @@ export function App() {
                 if (!current || current.thread.id !== threadId) return current;
                 const missingMessages = collectMissingSnapshotMessages(current.messages, expected.messages);
                 const messages = mergeRecoveredSnapshotMessages(current.messages, missingMessages);
-                const missingToolCalls = collectMissingSnapshotRecords(current.toolCalls, expected.toolCalls);
-                const toolCalls = missingToolCalls.length > 0
-                  ? mergeSnapshotRecords(current.toolCalls, missingToolCalls, (toolCall) => toolCall.startedAt)
-                  : current.toolCalls;
+                const toolCalls = mergeRuntimeToolCallSummaries(current.toolCalls, expected.toolCalls);
                 if (messages === current.messages && toolCalls === current.toolCalls) return current;
                 return {
                   ...current,
@@ -5238,22 +5128,6 @@ export function App() {
           }, 1_200);
         }
       }
-      emitTranscriptDiagnostic("snapshot.applied", 0, {
-        thr: shortDiagId(threadId),
-        mode: next.snapshotMode,
-        serverCount: next.messageCount,
-        got: next.messages.length,
-        localCount: localMessages.length,
-        finalCount: mergedSnapshot.messages.length,
-        hasNewMessages,
-        baseToolCallCount: base?.toolCalls.length ?? 0,
-        serverToolCallCount: next.toolCalls.length,
-        finalToolCallCount: mergedSnapshot.toolCalls.length,
-        hasNewToolCalls,
-        fullSnapshotMissingToolCallCount: fullSnapshotMissingToolCallIds.length,
-        fullSnapshotMissingToolCallIds: fullSnapshotMissingToolCallIds.slice(0, 20),
-        reachedTerminalState
-      });
       setThreads((current) => current.map((thread) =>
         thread.id === mergedSnapshot.thread.id
           ? resolveLatestThreadRecord(thread, mergedSnapshot.thread)
@@ -5264,16 +5138,24 @@ export function App() {
         // Snapshot refresh can win a race where the queue already drained but the
         // thread has not flipped to running yet. Keep the local preparing
         // heartbeat so the chat does not go blank after send.
-        let preserveLocalPreparing = false;
+        let preserveLocalRuntime = false;
         setRuntimeProgress((current) => {
           if (current?.threadId !== threadId) return current;
+          if (shouldPreserveObservedRuntime(
+            mergedSnapshot.thread.status,
+            current.runtimeObserved,
+            Boolean(suppressRuntimeProgressRef.current[threadId])
+          )) {
+            preserveLocalRuntime = true;
+            return current;
+          }
           if (!current.runtimeObserved) {
-            preserveLocalPreparing = shouldPreservePreparingRuntime(
+            preserveLocalRuntime = shouldPreservePreparingRuntime(
               mergedSnapshot.thread.status,
               next.queuedMessages.length,
               false
             );
-            return preserveLocalPreparing ? current : null;
+            return preserveLocalRuntime ? current : null;
           }
           return shouldPreservePreparingRuntime(
             mergedSnapshot.thread.status,
@@ -5281,7 +5163,7 @@ export function App() {
             current.runtimeObserved
           ) ? current : null;
         });
-        if (!preserveLocalPreparing) {
+        if (!preserveLocalRuntime) {
           // A refresh can observe completion before its final runtime event reaches
           // the renderer. Do not let an old activity record keep the thinking UI alive.
           clearRuntimeActivity(threadId);
@@ -5445,6 +5327,10 @@ export function App() {
   }
 
   function activateNewThread(thread: ThreadRecord) {
+    // 新会话与随手记共用聊天区，创建后直接展示会话。
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
     selectThreadId(thread.id);
     seedOptimisticThreadSnapshot(thread);
     // The composer is usable from the optimistic state. Fetch everything else
@@ -5454,6 +5340,10 @@ export function App() {
   }
 
   async function openThread(threadId: string, options?: { scrollToLatest?: boolean }) {
+    // 点左侧任意会话即回到聊天：随手记让位，不必先按面板上的关闭按钮。
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
@@ -5643,6 +5533,10 @@ export function App() {
   // 合并后的「新建任务」入口：清空上一轮选择，进入空白任务页（右侧居中显示输入框）。
   // preset.workspaceCwd：删除项目内的任务后回到此页时，默认沿用该项目的工作空间与当前分支。
   function openNewTaskComposer(preset?: { workspaceCwd?: string | null }) {
+    // 点「新建任务」同样回到聊天区，随手记面板收起。
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
     if (selectedThreadId) selectThreadId(null);
     setInput("");
     setIsNewTaskComposerOpen(true);
@@ -5781,7 +5675,8 @@ export function App() {
       }
       setThreads(nextThreads);
       setProjectEditDraft(null);
-      await refreshThreads({ fallbackToFirst: false });
+      // 当前会话快照由下面的 refreshSnapshot 定向刷新，避免这里再整体重载一次。
+      await refreshThreads({ refreshSelectedSnapshot: false, fallbackToFirst: false });
       if (selectedThreadId && group.some((thread) => thread.id === selectedThreadId)) await refreshSnapshot(selectedThreadId);
       showNotice("项目源文件夹已更新。", { tone: "success" });
     } catch (error) {
@@ -6014,72 +5909,6 @@ export function App() {
     }
   }
 
-  function requestClearCurrentChat() {
-    if (!selectedThreadId) {
-      return;
-    }
-    if (isThreadExecutionInProgress(selectedThreadStatus)) {
-      showNotice("任务正在执行，请先停止任务再清空聊天记录。");
-      return;
-    }
-    setIsClearChatConfirmOpen(true);
-  }
-
-  async function confirmClearCurrentChat() {
-    const threadId = selectedThreadId;
-    if (!threadId || isClearingChat) {
-      return;
-    }
-
-    setIsClearingChat(true);
-    try {
-      await window.codexh.clearThreadConversation(threadId);
-      delete pendingUserMessagesRef.current[threadId];
-      delete snapshotCursorByThreadRef.current[threadId];
-      delete latestRuntimeThreadsRef.current[threadId];
-      delete persistedRuntimeMessagesRef.current[threadId];
-      snapshotCacheByThreadRef.current.delete(threadId);
-      delete suppressRuntimeProgressRef.current[threadId];
-      discardQueuedAssistantDraftsForThread(threadId);
-      gpaSameSessionAutoResumeRef.current.delete(threadId);
-      gpaPlanResumeDismissedRef.current.delete(threadId);
-      gpaPlanResumeAttemptRef.current.delete(threadId);
-      gpaPlanResumeRetryRequiredRef.current.delete(threadId);
-      setAssistantDrafts((current) =>
-        Object.fromEntries(Object.entries(current).filter(([, entry]) => entry.threadId !== threadId))
-      );
-      setRuntimeActivities((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      setCompletedTurnTimers((current) => {
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-      clearTerminalThread(threadId);
-      setBrowserTabsByThread((current) => ({ ...current, [threadId]: [] }));
-      setActiveToolCall((current) => current?.threadId === threadId ? null : current);
-      setRuntimeProgress((current) => current?.threadId === threadId ? null : current);
-      setComposerSubmission(null);
-      setEditingUserMessage(null);
-      setGpaPlanResumeRetryPrompt(null);
-      setIsTerminalOpen(false);
-      setIsClearChatConfirmOpen(false);
-      setThreadTokenUsage({ turn: createEmptyTokenUsage(), thread: createEmptyTokenUsage(), turnRunId: null });
-      await refreshThreads();
-      showNotice("聊天记录已清空。", { tone: "success" });
-      window.setTimeout(() => composerRef.current?.focus(), 0);
-    } catch (error) {
-      showNotice("暂时无法清空聊天记录。", {
-        message: error instanceof Error ? error.message : "请稍后重试。"
-      });
-    } finally {
-      setIsClearingChat(false);
-    }
-  }
-
   async function sendMessage(
     forcedContent?: string,
     stageOverride?: GpaStage,
@@ -6131,6 +5960,12 @@ export function App() {
     }
 
     if (!options?.internal) {
+      // Leave the blank new-task layout before waiting for the thread to be
+      // created. Otherwise the async create call leaves the old landing page
+      // visible for a frame while the first message is already submitting.
+      if (!targetThreadId && isNewTaskComposerOpen) {
+        setIsNewTaskComposerOpen(false);
+      }
       setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString() });
     }
 
@@ -6163,18 +5998,16 @@ export function App() {
           });
         }
       }
-      if (gpaState.fullAccess) {
-        try {
-          await window.codexh.setGpaFullAccess({ threadId, fullAccess: true });
-        } catch (error) {
-          setGpaState((prev) => ({ ...prev, fullAccess: false }));
-          void refreshThreads();
-          void refreshSnapshot(thread.id);
-          showNotice("完全访问设置未保存", {
-            message: error instanceof Error ? error.message : "请重新设置后再发送。"
-          });
-          return;
-        }
+      try {
+        await window.codexh.setGpaFullAccess({ threadId, fullAccess: gpaState.fullAccess });
+      } catch (error) {
+        setGpaState((prev) => ({ ...prev, fullAccess: false }));
+        void refreshThreads();
+        void refreshSnapshot(thread.id);
+        showNotice("完全访问设置未保存", {
+          message: error instanceof Error ? error.message : "请重新设置后再发送。"
+        });
+        return;
       }
       void refreshThreads();
       void refreshSnapshot(thread.id);
@@ -6208,14 +6041,6 @@ export function App() {
     const optimisticMessage = !options?.internal && !queueingBehindActiveTask
       ? appendOptimisticUserMessage(threadId, displayContent)
       : null;
-    if (optimisticMessage) {
-      scheduleUserMessageSendDiagnostic(threadId, optimisticMessage.id, displayContent, {
-        inputs: transcriptDiagnosticInputsRef,
-        live: snapshotRef,
-        pending: pendingUserMessagesRef,
-        rendered: renderedTranscriptMessageIdsRef
-      });
-    }
     // Start the under-message heartbeat immediately so send never looks like a
     // silent no-op while attachments/skills/runtime wake are still in flight.
     if (!options?.internal && !queueingBehindActiveTask) {
@@ -7252,7 +7077,7 @@ export function App() {
     }, 160);
   }
 
-  function openComposerAddSubmenu(view: "skills" | "mcp" | "database" | "apiCards", target: HTMLElement) {
+  function openComposerAddSubmenu(view: "skills" | "mcp" | "database", target: HTMLElement) {
     clearComposerAddMenuCloseTimer();
     setComposerAddSubmenuAnchor(target);
     setComposerAddMenuView(view);
@@ -7554,7 +7379,6 @@ export function App() {
   const visibleUserSkillGenerationDialog = userSkillGenerationDialog ?? userSkillGenerationDialogPresence.value;
   const managedRemovalPresence = useMotionPresence(managedRemoval);
   const visibleManagedRemoval = managedRemoval ?? managedRemovalPresence.value;
-  const clearChatConfirmPresence = useMotionPresence(isClearChatConfirmOpen ? true : null);
   const clearErrorSolutionsConfirmPresence = useMotionPresence(isClearErrorSolutionsConfirmOpen ? true : null);
   const clearSelfImprovementConfirmPresence = useMotionPresence(isClearSelfImprovementConfirmOpen ? true : null);
   const clearLogsConfirmPresence = useMotionPresence(isClearLogsConfirmOpen ? true : null);
@@ -7569,6 +7393,8 @@ export function App() {
   const terminalDrawerPresence = useMotionPresence(isTerminalOpen ? true : null, 220);
   const helpPresence = useMotionPresence(isHelpOpen ? true : null, 220);
   const quickNotesPresence = useMotionPresence(isQuickNotesOpen ? true : null, 220);
+  const apiFavoritesPresence = useMotionPresence(isApiFavoritesOpen ? true : null, 220);
+  const documentViewerPresence = useMotionPresence(isDocumentViewerOpen ? true : null, 220);
   // Sharing reads the same transcript the user sees, so a shared message always
   // matches the rendered answer (tool event blocks are excluded) and the tick
   // boxes line up with the conversation on screen.
@@ -7631,10 +7457,12 @@ export function App() {
       }
     }
 
-    return [...groups.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+    return [...groups.values()]
+      .map((group) => ({ ...group, threads: sortHistoryThreadsByRecentActivity(group.threads) }))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
   }, [threads]);
   const standaloneHistoryThreads = useMemo(
-    () => threads.filter((thread) => thread.mode !== "project" || !thread.cwd),
+    () => sortHistoryThreadsByRecentActivity(threads.filter((thread) => thread.mode !== "project" || !thread.cwd)),
     [threads]
   );
   const recentProjectPaths = useMemo(
@@ -7720,7 +7548,40 @@ export function App() {
   });
   const openNewTaskComposerEvent = useStableEvent(openNewTaskComposer);
   const openThreadEvent = useStableEvent(openThread);
-  const openQuickNotesEvent = useStableEvent(openQuickNotes);
+  // 随手记接管聊天区：打开前先退出分享模式并收起终端抽屉，避免多套界面同时占位。
+  const openQuickNotesEvent = useStableEvent(() => {
+    // 已打开时再点一次侧栏入口即收起：随手记与聊天共用同一块区域，入口兼作切换。
+    if (isQuickNotesOpen) return Promise.resolve();
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    return openQuickNotes();
+  });
+  // 接口卡片入口就在随手记下方，同样接管聊天区，两个面板互斥显示。
+  const openApiFavoritesEvent = useStableEvent(() => {
+    if (isApiFavoritesOpen) {
+      setIsApiFavoritesOpen(false);
+      return;
+    }
+    setIsQuickNotesOpen(false);
+    setIsDocumentViewerOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    setIsApiFavoritesOpen(true);
+  });
+  // 查看文档入口排在接口卡片下方，同样接管聊天区，与随手记、接口卡片互斥显示。
+  const openDocumentViewerEvent = useStableEvent(() => {
+    if (isDocumentViewerOpen) {
+      requestDocumentViewerClose();
+      return;
+    }
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    setIsDocumentViewerOpen(true);
+  });
   const openHistorySearchEvent = useStableEvent(openHistorySearch);
   const openSettingsEvent = useStableEvent((tab: SettingsTab) => {
     if (config) resetConfigDraft(config);
@@ -7750,7 +7611,8 @@ export function App() {
     if (!selectedThreadId || gitLoading) return;
     setGitRefreshRevision((current) => current + 1);
   });
-  const visibleGitSnapshot = gitSnapshotThreadId === `${selectedThreadId}:${gitRoot}` ? gitSnapshot : null;
+  const gitSnapshotScopeKey = `${selectedThreadId ?? "new-task"}:${selectedThreadId ? gitRoot : workspaceScopeCwd}`;
+  const visibleGitSnapshot = gitSnapshotThreadId === gitSnapshotScopeKey ? gitSnapshot : null;
   const selectedProjectBranch = visibleGitSnapshot?.available
     ? visibleGitSnapshot.branch?.trim() || null
     : null;
@@ -7867,6 +7729,13 @@ export function App() {
         onCreateTask={openNewTaskComposerEvent}
         onOpenThread={openThreadEvent}
         onOpenQuickNotes={openQuickNotesEvent}
+        quickNotesActive={isQuickNotesOpen}
+        onOpenApiFavorites={openApiFavoritesEvent}
+        apiFavoritesActive={isApiFavoritesOpen}
+        onOpenDocumentViewer={openDocumentViewerEvent}
+        documentViewerActive={isDocumentViewerOpen}
+        documentViewerOpenCount={documentTabs.tabs.length}
+        hiddenSidebarItems={config?.desktop.hiddenSidebarItems}
         onOpenSearch={openHistorySearchEvent}
         onOpenSettings={openSettingsEvent}
         updatePhase={updateState?.phase}
@@ -7913,7 +7782,7 @@ export function App() {
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
         ) : null}
-        <WorkspaceControls
+        {isQuickNotesOpen || isApiFavoritesOpen || isDocumentViewerOpen ? null : <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}
           tokenUsageOpen={isTokenUsagePanelOpen}
           tokenUsageMotionPhase={tokenUsagePanelPresence.value ? tokenUsagePanelPresence.phase : undefined}
@@ -7950,7 +7819,7 @@ export function App() {
             setIsRightWorkspaceOpen(true);
           }}
           projectWorkspace={isProjectWorkspaceThread(selectedThread?.mode)}
-        />
+        />}
         {pendingInteractionsPresence.value ? (
           <div className="pending-strip" data-motion={pendingInteractionsPresence.phase}>
             {visiblePendingApprovalCount > 0 ? (
@@ -7976,7 +7845,57 @@ export function App() {
           </div>
         ) : null}
 
-        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""}`}>
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""} ${isQuickNotesOpen ? "is-quick-notes" : ""} ${isApiFavoritesOpen ? "is-api-favorites" : ""} ${isDocumentViewerOpen ? "is-document-viewer" : ""}`}>
+          {quickNotesPresence.value ? (
+            <QuickNotesPanel
+              motionPhase={quickNotesPresence.phase}
+              notes={quickNotes}
+              selectedId={selectedQuickNoteId}
+              title={quickNoteTitle}
+              content={quickNoteContent}
+              saving={quickNoteSaving}
+              status={quickNoteStatus}
+              renamingId={renamingQuickNoteId}
+              setRenamingId={setRenamingQuickNoteId}
+              renameDraft={quickNoteRenameDraft}
+              setRenameDraft={setQuickNoteRenameDraft}
+              visibleMenu={visibleQuickNoteListMenu}
+              menuMotionPhase={quickNoteListMenuPresence.phase}
+              visibleDeleteConfirm={visibleQuickNoteDeleteConfirm}
+              deleteMotionPhase={quickNoteDeleteConfirmPresence.phase}
+              onClose={() => setIsQuickNotesOpen(false)}
+              onCreate={createQuickNote}
+              onSelect={selectQuickNote}
+              onOpenMenu={setQuickNoteListMenu}
+              onCloseMenu={() => setQuickNoteListMenu(null)}
+              onRequestDelete={setQuickNoteDeleteConfirm}
+              onCloseDeleteConfirm={() => setQuickNoteDeleteConfirm(null)}
+              onRename={renameQuickNote}
+              onContentChange={changeQuickNoteContent}
+              cloudNoteId={selectedQuickNoteCloudId}
+              syncingCloud={quickNoteSyncingCloud}
+              onSyncToCloud={syncQuickNoteToCloud}
+              onSave={saveQuickNote}
+              onDelete={deleteQuickNote}
+            />
+          ) : null}
+          {apiFavoritesPresence.value ? (
+            <ApiFavoritesInlinePanel
+              motionPhase={apiFavoritesPresence.phase}
+              threadId={selectedThreadId}
+              onClose={() => setIsApiFavoritesOpen(false)}
+              onInsert={(favorite) => {
+                setIsApiFavoritesOpen(false);
+                void sendApiCardFavoriteToChat(favorite);
+              }}
+            />
+          ) : null}
+          {documentViewerPresence.value ? (
+            <DocumentViewerPanel
+              motionPhase={documentViewerPresence.phase}
+              documents={documentTabs}
+            />
+          ) : null}
           <div
             ref={chatScrollRef}
             className={`chat-scroll ${showWelcome ? "welcome-mode" : ""} ${isThreadSwitching ? "is-thread-switching" : ""}`}
@@ -8041,17 +7960,6 @@ export function App() {
                   selectedShareMessageIds={selectedShareIdSet}
                   onToggleShareMessage={toggleShareMessage}
                 />
-                {activeAssistantDraft ? (
-                  <AssistantDraftMessage
-                    key={`draft-${activeAssistantDraft.draftId}`}
-                    assistantLabel={activeAssistantLabel}
-                    content={activeDraftContent}
-                    draftId={activeAssistantDraft.draftId}
-                    phase={activeAssistantDraft.phase}
-                    startedAt={activeAssistantDraft.startedAt}
-                    completed={activeAssistantDraft.completed}
-                  />
-                ) : null}
                 {pendingApprovals.map((approval) => (
                   <ApprovalCard
                     key={approval.id}
@@ -8366,16 +8274,6 @@ export function App() {
                   ) : null}
                 </div>
                 <div className="composer-toolbar-right">
-                  <button
-                    className="composer-icon-button composer-clear-chat-button"
-                    type="button"
-                    title={isThreadExecutionInProgress(selectedThreadStatus) ? "请先停止任务" : "清空本次聊天"}
-                    aria-label="清空本次聊天"
-                    disabled={!selectedThreadId || showWelcome || isClearingChat || isThreadExecutionInProgress(selectedThreadStatus)}
-                    onClick={requestClearCurrentChat}
-                  >
-                    <IconEraser />
-                  </button>
                   <ComposerModelPicker
                     triggerLabel={currentModelTriggerLabel}
                     providers={composerProviderOptions}
@@ -8472,10 +8370,10 @@ export function App() {
           expandedTab={rightWorkspaceExpandedTab}
           onExpandedTabChange={setRightWorkspaceExpandedTab}
           onHide={hideRightWorkspaceEvent}
-          projectRoot={filesRoot}
-          workspaceRoots={workspaceRoots}
+          projectRoot={workspaceScopeCwd}
+          workspaceRoots={rightWorkspaceRoots}
           onProjectRootChange={setActiveFilesRoot}
-          gitRoot={gitRoot}
+          gitRoot={selectedThreadId ? gitRoot : workspaceScopeCwd}
           onGitRootChange={setActiveGitRoot}
           onAddAttachment={addComposerAttachmentEvent}
           projectFiles={projectFiles}
@@ -8496,15 +8394,17 @@ export function App() {
           browserTabsByThread={browserTabsByThread}
           mountedBrowserThreadIds={mountedBrowserThreadIds}
           onCloseBrowserTab={closeBrowserTabEvent}
-          showProjectWorkspace={isProjectWorkspaceThread(selectedThread?.mode)}
+          showProjectWorkspace={rightWorkspaceActive}
           showSubagentTab={subagentPresentations.length > 0}
           subagentItems={workspaceSubagentPresentations}
           selectedSubagentId={selectedSubagentId}
           onSelectSubagent={selectSubagentEvent}
           thinkingText={thinkingText}
+          thinkingDraftText={activeDraftContent}
+          thinkingDraftStreaming={draftStreaming}
+          thinkingNotes={thinkingNotes}
           thinkingRunning={isTaskProcessing}
           thinkingStreaming={thinkingStreaming}
-          thinkingNotes={thinkingNotes}
           threadId={selectedThreadId}
         />
 
@@ -8597,6 +8497,10 @@ export function App() {
                 <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
+              {settingsTab === "general" && configDraft ? (
+                <SidebarNavPage configDraft={configDraft} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
+              ) : null}
+
               {settingsTab === "update" ? (
                 <SettingsUpdatePage updateState={updateState} onCheck={() => void checkForUpdates()} onDownload={() => void downloadAvailableUpdate()} onInstall={() => void installDownloadedUpdate()} formatPhase={formatUpdatePhase} formatDownloadSize={formatUpdateDownloadSize} />
               ) : null}
@@ -8638,12 +8542,6 @@ export function App() {
                 />
               ) : null}
 
-              {settingsTab === "apiFavorites" ? (
-                <ApiFavoritesPage onInsert={(favorite) => {
-                  setIsSettingsOpen(false);
-                  void sendApiCardFavoriteToChat(favorite);
-                }} threadId={selectedThreadId} />
-              ) : null}
               {settingsTab === "cloudNotes" ? (
                 <CloudNotesPage showNotice={showNotice} />
               ) : null}
@@ -8679,40 +8577,6 @@ export function App() {
       ) : null}
 
       {helpPresence.value ? <HelpSheet motionPhase={helpPresence.phase} onClose={() => setIsHelpOpen(false)} /> : null}
-
-      {quickNotesPresence.value ? (
-        <QuickNotesSheet
-          motionPhase={quickNotesPresence.phase}
-          notes={quickNotes}
-          selectedId={selectedQuickNoteId}
-          title={quickNoteTitle}
-          content={quickNoteContent}
-          saving={quickNoteSaving}
-          status={quickNoteStatus}
-          renamingId={renamingQuickNoteId}
-          setRenamingId={setRenamingQuickNoteId}
-          renameDraft={quickNoteRenameDraft}
-          setRenameDraft={setQuickNoteRenameDraft}
-          visibleMenu={visibleQuickNoteListMenu}
-          menuMotionPhase={quickNoteListMenuPresence.phase}
-          visibleDeleteConfirm={visibleQuickNoteDeleteConfirm}
-          deleteMotionPhase={quickNoteDeleteConfirmPresence.phase}
-          onClose={() => setIsQuickNotesOpen(false)}
-          onCreate={createQuickNote}
-          onSelect={selectQuickNote}
-          onOpenMenu={setQuickNoteListMenu}
-          onCloseMenu={() => setQuickNoteListMenu(null)}
-          onRequestDelete={setQuickNoteDeleteConfirm}
-          onCloseDeleteConfirm={() => setQuickNoteDeleteConfirm(null)}
-          onRename={renameQuickNote}
-          onContentChange={changeQuickNoteContent}
-          cloudNoteId={selectedQuickNoteCloudId}
-          syncingCloud={quickNoteSyncingCloud}
-          onSyncToCloud={syncQuickNoteToCloud}
-          onSave={saveQuickNote}
-          onDelete={deleteQuickNote}
-        />
-      ) : null}
 
       {mcpCreatePresence.value && visibleMcpCreateDraft ? (
         <McpCreateSheet
@@ -8804,19 +8668,6 @@ export function App() {
           role="alertdialog"
           onClose={() => setIsClearLogsConfirmOpen(false)}
           onConfirm={() => void confirmClearRuntimeLogs()}
-        />
-      ) : null}
-
-      {clearChatConfirmPresence.value ? (
-        <ConfirmationSheet
-          motionPhase={clearChatConfirmPresence.phase}
-          titleId="clear-chat-confirm-title"
-          title="清空本次聊天？"
-          description="消息、执行记录和本次打开的网页都会被永久删除，且无法恢复。项目文件不会被删除。"
-          confirmLabel={isClearingChat ? "正在清空..." : "确认清空"}
-          busy={isClearingChat}
-          onClose={() => setIsClearChatConfirmOpen(false)}
-          onConfirm={() => void confirmClearCurrentChat()}
         />
       ) : null}
 
@@ -8946,18 +8797,13 @@ export function App() {
           onSelectMediaIntent={(intent) => setComposerMediaIntent((current) => (current === intent ? null : intent))}
           skills={visibleComposerSkills}
           filteredSkills={filteredComposerSkills}
-          apiCardFavorites={apiCardFavorites}
-          apiCardMatches={apiCardMenuMatches}
           skillsQuery={skillsMenuQuery}
-          apiCardQuery={apiCardMenuQuery}
           onClose={() => { setGpaMenuOpen(false); setGpaMenuPos(null); }}
           onChooseFiles={chooseComposerFiles}
           onOpenSubmenu={openComposerAddSubmenu}
           onSetView={setComposerAddMenuView}
           onSetSkillsQuery={setSkillsMenuQuery}
-          onSetApiCardQuery={setApiCardMenuQuery}
           onAddAttachment={addComposerAttachment}
-          onSendApiCard={sendApiCardFavoriteToChat}
           onSetFullAccess={setFullAccess}
           onSetKnowledgeEnabled={setKnowledgeEnabled}
           onSetMultiAgentMode={updateMultiAgentMode}

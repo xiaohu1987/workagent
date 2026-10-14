@@ -10,6 +10,7 @@ import {
   mergeSnapshotRecords,
   resolveSnapshotRecoveryMessages
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
+import { invalidateThreadSnapshotForFullRefresh } from "../apps/desktop/src/renderer/core/thread-ui-state";
 import type { MessageRecord } from "@shared-types";
 
 // A snapshot read is authoritative, but the commit that carries it can be
@@ -173,5 +174,46 @@ describeWithFixture("4e4847c1: a short live transcript converges on the read", (
     const ids = expectedVisibleMessageIds([...snapshotMessages, internal], "completed");
     expect(ids.has("internal-row")).toBe(false);
     expect(ids.has(TARGET)).toBe(true);
+  });
+});
+
+// 清空会话是在服务端删除记录，但渲染层把“服务端列表比本地更旧”当作需要补回本地行的信号。
+// 只要本地快照基线还活着，紧随清空之后的那次全量读取就会读到空列表、再把这些行原样贴回，
+// 于是提示已清空而聊天记录纹丝不动。下面两条分别钉住“基线残留会复原旧记录”与“清空后基线
+// 被真正丢弃”（快照缓存、增量游标、在途读取请求与运行时消息映射一并作废）。
+describe("a cleared conversation cannot be rebuilt by the next snapshot read", () => {
+  const row = (id: string, createdAt: string) => ({ id, createdAt });
+
+  it("re-attaches the cleared rows while a stale local baseline survives", () => {
+    const staleLocalRows = [
+      row("user-1", "2026-10-12T08:00:00.000Z"),
+      row("assistant-1", "2026-10-12T08:00:30.000Z")
+    ];
+    expect(mergeServerMessagesWithNewerLocal([], staleLocalRows).map((message) => message.id))
+      .toEqual(["user-1", "assistant-1"]);
+  });
+
+  it("holds the empty server list once the clear drops the baseline", () => {
+    const cursorByThread = { "thread-1": "cursor-1" };
+    const requestIdsByThread = { "thread-1": 7 };
+    const cacheByThread = new Map([
+      ["thread-1", { messages: [row("user-1", "2026-10-12T08:00:00.000Z")] }]
+    ]);
+    const runtimeMessagesByThread: Record<string, Array<{ id: string; createdAt: string }>> = {
+      "thread-1": [row("user-1", "2026-10-12T08:00:00.000Z")]
+    };
+
+    invalidateThreadSnapshotForFullRefresh("thread-1", {
+      cursorByThread,
+      requestIdsByThread,
+      cacheByThread,
+      runtimeMessagesByThread
+    });
+
+    const localRows = cacheByThread.get("thread-1")?.messages ?? [];
+    expect(localRows).toEqual([]);
+    expect(mergeServerMessagesWithNewerLocal([], localRows)).toEqual([]);
+    expect(runtimeMessagesByThread["thread-1"]).toBeUndefined();
+    expect(requestIdsByThread["thread-1"]).toBe(8);
   });
 });

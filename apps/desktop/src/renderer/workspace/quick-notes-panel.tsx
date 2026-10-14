@@ -1,0 +1,62 @@
+import type { Dispatch, SetStateAction } from "react";
+import { IconClose, IconKnowledge, IconPlus } from "../icons";
+
+type QuickNote = { id: string; title: string; content: string; updatedAt: string; cloudNoteId: string | null };
+type NoteMenu = { x: number; y: number; note: Pick<QuickNote, "id" | "title" | "content"> } | null;
+type DeleteConfirm = { id: string; title: string } | null;
+
+type Props = {
+  motionPhase: string;
+  notes: QuickNote[];
+  selectedId: string | null;
+  title: string;
+  content: string;
+  saving: boolean;
+  status: string;
+  renamingId: string | null;
+  renameDraft: string;
+  visibleMenu: NoteMenu;
+  menuMotionPhase: string;
+  visibleDeleteConfirm: DeleteConfirm;
+  deleteMotionPhase: string;
+  setRenamingId: Dispatch<SetStateAction<string | null>>;
+  setRenameDraft: Dispatch<SetStateAction<string>>;
+  onClose: () => void;
+  onCreate: () => void;
+  onSelect: (note: QuickNote) => void;
+  onOpenMenu: (menu: Exclude<NoteMenu, null>) => void;
+  onCloseMenu: () => void;
+  onRequestDelete: (target: Exclude<DeleteConfirm, null>) => void;
+  onCloseDeleteConfirm: () => void;
+  onRename: (note: Pick<QuickNote, "id" | "content">) => Promise<void>;
+  onContentChange: (content: string) => void;
+  onSave: () => Promise<void>;
+  onDelete: (target: Exclude<DeleteConfirm, null>) => Promise<void>;
+  cloudNoteId: string | null;
+  syncingCloud: boolean;
+  onSyncToCloud: () => Promise<void>;
+};
+
+/**
+ * 随手记面板：常驻在聊天区里显示与操作，不再以弹窗形式覆盖界面。
+ * 容器沿用既有 `.quick-notes-sheet` 样式作用域，`.quick-notes-inline` 只负责铺满聊天区并去掉弹窗外观。
+ */
+export function QuickNotesPanel({ notes, selectedId, content, saving, status, renamingId, setRenamingId, renameDraft, setRenameDraft, visibleMenu, menuMotionPhase, visibleDeleteConfirm, deleteMotionPhase, motionPhase, onClose, onCreate, onSelect, onOpenMenu, onCloseMenu, onRequestDelete, onCloseDeleteConfirm, onRename, onContentChange, onSave, onDelete, cloudNoteId, syncingCloud, onSyncToCloud }: Props) {
+  return (
+    <section className="quick-notes-sheet quick-notes-inline" aria-label="随手记" data-motion={motionPhase}>
+      <header className="project-sheet-header"><div className="quick-notes-header-title"><span className="quick-notes-header-icon" aria-hidden="true"><IconKnowledge /></span><strong id="quick-notes-title">随手记</strong><span className="quick-notes-header-scope">全局知识库</span></div><button className="project-sheet-close" type="button" title="收起随手记" aria-label="收起随手记" onClick={onClose}><IconClose /></button></header>
+      <div className="quick-notes-layout">
+        <aside className="quick-notes-list">
+          <div className="quick-notes-list-header"><span>笔记</span><button type="button" title="新建笔记" aria-label="新建笔记" className="quick-notes-add" onClick={onCreate}><IconPlus /></button></div>
+          {notes.length ? <div className="quick-notes-items">{notes.map((note) => <button key={note.id} type="button" className={`quick-notes-item ${note.id === selectedId ? "selected" : ""}`} onClick={() => onSelect(note)} onContextMenu={(event) => { event.preventDefault(); onOpenMenu({ x: event.clientX, y: event.clientY, note }); }}>
+            {renamingId === note.id ? <input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onClick={(event) => event.stopPropagation()} onBlur={() => void onRename(note)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") setRenamingId(null); }} /> : <strong>{note.title}</strong>}
+            <span className="quick-notes-item-meta">{note.cloudNoteId ? <span className="quick-notes-item-cloud">已关联云笔记</span> : null}<span className="quick-notes-item-time">{new Date(note.updatedAt).toLocaleString()}</span></span>
+          </button>)}</div> : <div className="quick-notes-empty">新建一条笔记，记录随时浮现的想法。</div>}
+        </aside>
+        <div className="quick-notes-editor"><div className="quick-notes-markdown-bar" aria-label="文档编辑器"><strong>文档</strong><span>富文本编辑 · 右键插入内容</span></div><textarea className="quick-notes-content-input quick-notes-plain-editor" value={content} onChange={(event) => onContentChange(event.target.value)} placeholder="在这里开始写作..." spellCheck={false} /><footer className="quick-notes-footer"><span className={`quick-notes-status ${status.includes("已同步") ? "is-synced" : ""}`}>{status}</span><div className="quick-notes-footer-actions">{cloudNoteId ? <span className="quick-notes-cloud-tag" title="该笔记已关联云笔记，两侧修改会立即互相同步">已关联云笔记</span> : null}<button type="button" className="button secondary" disabled={saving || syncingCloud || !selectedId} onClick={() => void onSyncToCloud()}>{syncingCloud ? "同步中..." : "同步到云笔记"}</button><button type="button" className="button primary" disabled={saving} onClick={() => void onSave()}>{saving ? "保存中..." : "保存"}</button></div></footer></div>
+      </div>
+      {visibleMenu ? <div className="quick-notes-list-context-menu" data-motion={menuMotionPhase} style={{ left: visibleMenu.x, top: visibleMenu.y }} onMouseLeave={onCloseMenu}><button type="button" onClick={() => { setRenamingId(visibleMenu.note.id); setRenameDraft(visibleMenu.note.title); onCloseMenu(); }}>重命名</button><button type="button" className="danger" onClick={() => { onRequestDelete({ id: visibleMenu.note.id, title: visibleMenu.note.title }); onCloseMenu(); }}>删除</button></div> : null}
+      {visibleDeleteConfirm ? <div className="quick-notes-confirm-bar" role="alertdialog" aria-label="确认删除随手记" data-motion={deleteMotionPhase}><span>删除「<strong>{visibleDeleteConfirm.title}</strong>」？该笔记与对应的全局知识库内容会一并删除。</span><div className="quick-notes-confirm-actions"><button type="button" onClick={onCloseDeleteConfirm}>取消</button><button type="button" className="danger" onClick={() => void onDelete(visibleDeleteConfirm)}>删除</button></div></div> : null}
+    </section>
+  );
+}

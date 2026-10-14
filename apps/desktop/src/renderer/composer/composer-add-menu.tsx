@@ -1,12 +1,10 @@
 import { createPortal } from "react-dom";
 import type { ReactNode } from "react";
 import type { AppConfig, GpaState, MultiAgentMode, SkillMetadata } from "@shared-types";
-import type { ApiCardFavorite } from "../api-card-favorites";
 import type { ComposerAttachmentInput } from "../lib/conversation-utils";
 import {
   IconChevronRight,
   IconFile,
-  IconGlobe,
   IconGpa,
   IconImage,
   IconKnowledge,
@@ -17,7 +15,7 @@ import {
 } from "../icons";
 import { FloatingSideMenu } from "./model-controls";
 
-type ComposerAddMenuView = "root" | "skills" | "mcp" | "database" | "apiCards";
+type ComposerAddMenuView = "root" | "skills" | "mcp" | "database";
 
 type ComposerAddMenuProps = {
   position: { left: number; top: number };
@@ -36,18 +34,13 @@ type ComposerAddMenuProps = {
   onSelectMediaIntent: (intent: "image" | "video") => void;
   skills: SkillMetadata[];
   filteredSkills: SkillMetadata[];
-  apiCardFavorites: ApiCardFavorite[];
-  apiCardMatches: ApiCardFavorite[];
   skillsQuery: string;
-  apiCardQuery: string;
   onClose: () => void;
   onChooseFiles: (imagesOnly: boolean) => void | Promise<void>;
   onOpenSubmenu: (view: Exclude<ComposerAddMenuView, "root">, anchor: HTMLElement) => void;
   onSetView: (view: ComposerAddMenuView) => void;
   onSetSkillsQuery: (query: string) => void;
-  onSetApiCardQuery: (query: string) => void;
   onAddAttachment: (attachment: ComposerAttachmentInput) => void;
-  onSendApiCard: (favorite: ApiCardFavorite) => void | Promise<void>;
   onSetFullAccess: (enabled: boolean) => void | Promise<void>;
   onSetKnowledgeEnabled: (enabled: boolean) => void | Promise<void>;
   onSetMultiAgentMode: (mode: MultiAgentMode) => void | Promise<void>;
@@ -75,18 +68,13 @@ export function ComposerAddMenu({
   onSelectMediaIntent,
   skills,
   filteredSkills,
-  apiCardFavorites,
-  apiCardMatches,
   skillsQuery,
-  apiCardQuery,
   onClose,
   onChooseFiles,
   onOpenSubmenu,
   onSetView,
   onSetSkillsQuery,
-  onSetApiCardQuery,
   onAddAttachment,
-  onSendApiCard,
   onSetFullAccess,
   onSetKnowledgeEnabled,
   onSetMultiAgentMode,
@@ -141,7 +129,6 @@ export function ComposerAddMenu({
               {mediaIntent === "video" ? <span className="gpa-popover-item-check is-active">已开启</span> : null}
             </button>
           ) : null}
-          <MenuSubmenuButton icon={<IconGlobe />} title="接口卡片" hint="调用收藏的 API 卡片" view="apiCards" activeView={view} onOpen={openSubmenu} />
           <MenuSubmenuButton icon={<IconSkills />} title="Skills" hint="为本次任务添加专业技能" view="skills" activeView={view} onOpen={openSubmenu} />
           <MenuSubmenuButton icon={<IconMcp />} title="MCP 服务" hint="指定本次任务优先使用的服务" view="mcp" activeView={view} onOpen={openSubmenu} />
           <MenuSubmenuButton icon={<IconMcp />} title="数据库" hint="限定本轮可查询的数据源" view="database" activeView={view} onOpen={openSubmenu} />
@@ -173,7 +160,7 @@ export function ComposerAddMenu({
       </div>
       {open && view !== "root" ? (
         <FloatingSideMenu anchor={submenuAnchor} open={Boolean(submenuAnchor)} width={252} placementKey={view} className="composer-add-menu-submenu composer-add-menu-submenu-floating" onMouseEnter={onClearCloseTimer} onMouseLeave={onScheduleCloseTimer}>
-          <div className="composer-add-menu-submenu-title">{view === "skills" ? "Skills" : view === "mcp" ? "MCP 服务" : view === "apiCards" ? "接口卡片" : "数据库"}</div>
+          <div className="composer-add-menu-submenu-title">{view === "skills" ? "Skills" : view === "mcp" ? "MCP 服务" : "数据库"}</div>
           <div className="composer-add-menu-list">
             {view === "skills" ? (
               <>
@@ -186,15 +173,6 @@ export function ComposerAddMenu({
               </>
             ) : view === "mcp" ? (
               <EnabledMcpServers config={config} onAddAttachment={onAddAttachment} onClose={closeMenu} />
-            ) : view === "apiCards" ? (
-              <>
-                <div className="composer-add-menu-search"><input className="form-input composer-add-menu-search-input" type="text" placeholder="搜索名称或 URL" aria-label="搜索收藏的接口卡片" value={apiCardQuery} autoFocus onChange={(event) => onSetApiCardQuery(event.target.value)} /></div>
-                {apiCardMatches.length > 0 ? apiCardMatches.map((favorite) => (
-                  <button key={favorite.id} className="gpa-popover-item" role="menuitem" onClick={() => { closeMenu(); onSetView("root"); onSetApiCardQuery(""); void onSendApiCard(favorite); }}>
-                    <span className={`api-card-method is-${favorite.config.method.toLowerCase()}`}>{favorite.config.method}</span><span className="gpa-popover-item-copy"><span className="gpa-popover-item-title">{favorite.name}</span><span className="gpa-popover-item-hint">{favorite.config.url}</span></span>
-                  </button>
-                )) : <span className="composer-add-menu-empty">{apiCardFavorites.length === 0 ? "还没有收藏的接口卡片,点击卡片右上角星标即可收藏" : "没有匹配的收藏卡片"}</span>}
-              </>
             ) : (
               <EnabledDatabases config={config} onAddAttachment={onAddAttachment} onClose={closeMenu} />
             )}

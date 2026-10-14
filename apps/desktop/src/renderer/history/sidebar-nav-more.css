@@ -1,0 +1,80 @@
+/* Rail "更多" flyout. These are the entries the user chose to hide, so the
+   trigger stays a quiet handle instead of a full rail row; it only brightens
+   on hover, focus or while the flyout is open. The panel itself reuses
+   .gpa-popover so it keeps the app-wide popover look. */
+.sidebar-nav-more {
+  display: flex;
+  justify-content: center;
+  margin-top: -4px;
+}
+
+.sidebar-nav-more-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 6px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.sidebar-nav-more-handle {
+  width: 24px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.3;
+  transition: width 140ms ease, opacity 140ms ease, background-color 140ms ease;
+}
+
+.sidebar-nav-more-trigger:hover,
+.sidebar-nav-more-trigger:focus-visible,
+.sidebar-nav-more-trigger[aria-expanded="true"] {
+  color: var(--text-soft);
+}
+
+.sidebar-nav-more-trigger:hover .sidebar-nav-more-handle,
+.sidebar-nav-more-trigger:focus-visible .sidebar-nav-more-handle,
+.sidebar-nav-more-trigger[aria-expanded="true"] .sidebar-nav-more-handle {
+  width: 30px;
+  opacity: 0.9;
+}
+
+/* A hidden entry owns the open panel: mark it with a small dot, but keep the
+   handle just as light so the rail still reads quietly. */
+.sidebar-nav-more-trigger.is-active {
+  color: var(--text-soft);
+}
+
+.sidebar-nav-more-trigger.is-active .sidebar-nav-more-handle {
+  opacity: 0.62;
+}
+
+.sidebar-nav-more-trigger.is-active::after {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text);
+  opacity: 0.72;
+}
+
+.gpa-popover.sidebar-nav-more-menu {
+  transform: translateY(-50%);
+  transform-origin: left center;
+  animation: sidebar-nav-more-in 140ms ease-out;
+}
+
+@keyframes sidebar-nav-more-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0) scale(1);
+  }
+}

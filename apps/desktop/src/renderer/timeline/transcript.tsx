@@ -9,6 +9,7 @@ import { CopyTextButton, MessageMediaLightbox, getFileLeafName, normalizeMarkdow
 import { useMotionPresence } from "../core/motion-presence";
 import { ApiCardThreadContext } from "../cards/api-card-message";
 import { reportToolTimelineDiagnostic } from "../lib/tool-timeline-diagnostics";
+import { mergeToolCallResults } from "./tool-activity-state";
 
 type ToolActivityGroupProps = {
   toolCalls: ToolCallRecord[];
@@ -106,16 +107,11 @@ export const ToolActivityGroup = memo(function ToolActivityGroup({
       toolCallIds: missingCalls.map((toolCall) => toolCall.id)
     }).then((details) => {
       if (cancelled) return;
-      setLoadedResults((current) => {
-        const next = new Map(current);
-        for (const toolCall of missingCalls) {
-          next.set(toolCall.id, null);
-        }
-        for (const detail of details) {
-          next.set(detail.toolCallId, detail.available ? detail.resultJson : null);
-        }
-        return next;
-      });
+      setLoadedResults((current) => mergeToolCallResults(
+        current,
+        details,
+        new Set(missingCalls.filter((toolCall) => toolCall.status === "pending" || toolCall.status === "running").map((toolCall) => toolCall.id))
+      ));
       setDetailLoadState("idle");
     }).catch(() => {
       if (!cancelled) setDetailLoadState("error");

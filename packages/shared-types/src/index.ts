@@ -1095,6 +1095,29 @@ export function resolveCompletionAuditModeSettings(
   return normalizeCompletionAuditSettings({ completionAudit: settings })[mode];
 }
 
+/**
+ * Sidebar rail entries the user can keep inline or tuck into the "更多" flyout.
+ * The id order here is also the render order on the rail.
+ */
+export const SIDEBAR_NAV_ITEM_IDS = ["quickNotes", "apiFavorites", "documentViewer"] as const;
+
+export type SidebarNavItemId = (typeof SIDEBAR_NAV_ITEM_IDS)[number];
+
+/**
+ * Config files written before this option existed have no value at all, and
+ * "no value" must mean "show everything" so upgrades keep the old rail.
+ */
+export function normalizeHiddenSidebarItems(value: unknown): SidebarNavItemId[] {
+  if (!Array.isArray(value)) return [];
+  const hidden = new Set<SidebarNavItemId>();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const matched = SIDEBAR_NAV_ITEM_IDS.find((id) => id === entry);
+    if (matched) hidden.add(matched);
+  }
+  return SIDEBAR_NAV_ITEM_IDS.filter((id) => hidden.has(id));
+}
+
 export interface AppConfig {
   defaultModel: string;
   defaultProvider: string;
@@ -1146,6 +1169,11 @@ export interface AppConfig {
     sandboxNetworkAccess: boolean;
     /** Electron global accelerator for capturing the desktop into the composer. Empty disables it. */
     screenshotShortcut?: string;
+    /**
+     * Rail entries the user moved into the sidebar "更多" flyout. Missing or
+     * empty keeps every entry inline, and the flyout is not rendered at all.
+     */
+    hiddenSidebarItems?: SidebarNavItemId[];
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;

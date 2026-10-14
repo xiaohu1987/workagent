@@ -16,8 +16,10 @@ import {
   shouldCommitThreadSnapshotImmediately,
   shouldIncludeRuntimeThreadInHistory,
   shouldPreservePreparingRuntime,
+  shouldPreserveObservedRuntime,
   shouldRefreshKnowledgeBasesForRuntimeEvent,
   shouldRefreshSelectedSnapshotForRuntimeEvent,
+  shouldRefreshSelectedSnapshotForToolEvent,
   shouldForceFullSnapshotForRuntimeCompletion,
   shouldInvalidateSnapshotForThreadUpdate,
   upsertSubagentIntoSnapshot,
@@ -27,6 +29,11 @@ import {
   queueThreadSettingWrite,
   waitForPendingThreadSettingWrites
 } from "../apps/desktop/src/renderer/core/thread-ui-state";
+import {
+  appendRuntimeOutputBatch,
+  MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS,
+  type RuntimeActivityOutput
+} from "../apps/desktop/src/renderer/core/runtime-activity";
 import {
   buildTimelineEntries,
   buildTimelineEntriesIncremental,
@@ -53,12 +60,14 @@ import {
   isPatchAssistantMessage,
   getAssistantDraftDisplayContent,
   mergeSnapshotRecords,
+  mergeRuntimeToolCallSummaries,
   reconcilePendingUserMessages,
   reconcilePendingUserMessagesDetailed,
   reconcileAssistantDraftCompletion,
   reconcileAssistantDraftReasoningUpdate,
   reconcileAssistantDraftStreamUpdate,
   reconcileAssistantDraftUpdate,
+  applyAssistantDraftUpdateBatch,
   resolveLatestThreadRecord,
   replaceConversationMessagesFromEdit,
   rewindThreadSnapshotForMessageEdit,
@@ -302,16 +311,14 @@ describe("thread UI state helpers", () => {
       note("note-2", "接着检查过滤链路。", "2026-09-24T03:00:03.000Z")
     ];
 
-    // While the turn runs the notes stay out of the transcript; the panel carries
-    // them in arrival order so the reader can still follow the play-by-play.
     expect(filterTranscriptMessages(notes, "running")).toEqual([]);
     expect(selectActiveTurnProcessNotes(notes, "running")).toEqual(["我先核对项目规则。", "接着检查过滤链路。"]);
     expect(selectActiveTurnProcessNotes(notes, "completed")).toEqual([]);
 
-    // Frozen turns keep the old rule: with no answer yet the notes are the turn body...
-    expect(filterTranscriptMessages(notes, "completed").map((message) => message.id)).toEqual(["note-1", "note-2"]);
+    expect(filterTranscriptMessages(notes, "completed")).toEqual([]);
+    expect(filterTranscriptMessages(notes, "waiting")).toEqual([]);
+    expect(filterTranscriptMessages(notes, "idle")).toEqual([]);
 
-    // ...and once an answer lands, the notes fold away for good.
     const answer: MessageRecord = {
       ...note("answer-1", "结论：两处都处理好了。", "2026-09-24T03:00:05.000Z"),
       content: "结论：两处都处理好了。",
@@ -320,6 +327,7 @@ describe("thread UI state helpers", () => {
     const withAnswer = [...notes, answer];
     expect(filterTranscriptMessages(withAnswer, "completed").map((message) => message.id)).toEqual(["answer-1"]);
     expect(filterTranscriptMessages(withAnswer, "running").map((message) => message.id)).toEqual(["answer-1"]);
+    expect(filterTranscriptMessages(withAnswer, "waiting").map((message) => message.id)).toEqual(["answer-1"]);
   });
   it("refreshes a parent task snapshot for runtime events from its subagents", () => {
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent(
@@ -337,6 +345,14 @@ describe("thread UI state helpers", () => {
       "parent-thread"
     )).toBe(true);
     expect(shouldRefreshSelectedSnapshotForRuntimeEvent("parent-thread")).toBe(true);
+  });
+
+  it("refreshes selected tool events only when there is no snapshot to patch or read in flight", () => {
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", false, null, false)).toBe(true);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", true, null, false)).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", false, "thread-1", false)).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-1", false, null, true)).toBe(false);
+    expect(shouldRefreshSelectedSnapshotForToolEvent("thread-1", "thread-2", false, null, false)).toBe(false);
   });
 
   it("does not abort a parent snapshot refresh for child-status echoes", () => {
@@ -455,6 +471,23 @@ describe("thread UI state helpers", () => {
     expect(shouldLoadProjectWorkspaceResource("project", true, "files", "git")).toBe(false);
   });
 
+  it("loads the folder and git workspace for the new-task page once a folder is chosen", () => {
+    expect(getDefaultRightWorkspaceTab(undefined, true)).toBe("files");
+    expect(getDefaultRightWorkspaceTab(null, false)).toBe("thinking");
+    expect(resolveRightWorkspaceTabForMode(undefined, "changes", true)).toBe("changes");
+    expect(resolveRightWorkspaceTabForMode(undefined, "browser", true)).toBe("browser");
+    expect(resolveRightWorkspaceTabForMode(undefined, "files", false)).toBe("thinking");
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "files", "files", true)).toBe(true);
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "changes", "git", true)).toBe(true);
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "files", "git", true)).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource(undefined, true, "files", "files", false)).toBe(false);
+    expect(shouldLoadProjectWorkspaceResource(undefined, false, "files", "files", true)).toBe(false);
+
+    const appSource = readFileSync(new URL("../apps/desktop/src/renderer/App.tsx", import.meta.url), "utf8");
+    expect(appSource).toContain("window.codexh.listProjectFilesByPath");
+    expect(appSource).toContain("window.codexh.getGitSnapshotByPath");
+  });
+
   it("refreshes the selected thread git snapshot while the git workspace tab is closed", () => {
     // 分支徽标读的是同一份 git 快照：快照刷新不能要求右侧 Git 面板处于打开状态，
     // 否则切换会话后徽标会一直缺失，直到点开面板重新触发刷新。
@@ -488,7 +521,7 @@ describe("thread UI state helpers", () => {
   it("provides a clean thread-scoped GPA state when no snapshot exists", () => {
     expect(normalizeGpaStateForThread("project", null)).toMatchObject({
       stage: "off",
-      fullAccess: false,
+      fullAccess: true,
       knowledgeEnabled: false,
       awaitingConfirmation: null,
       planTasks: []
@@ -497,11 +530,11 @@ describe("thread UI state helpers", () => {
 
   it("restores durable GPA flags after a thread switch reset", () => {
     const resetState = normalizeGpaStateForThread("chat", null);
-    expect(resetState.fullAccess).toBe(false);
+    expect(resetState.fullAccess).toBe(true);
 
-    const restored = mergeDurableGpaFlags(resetState, { fullAccess: true, knowledgeEnabled: true });
+    const restored = mergeDurableGpaFlags(resetState, { fullAccess: false, knowledgeEnabled: true });
 
-    expect(restored.fullAccess).toBe(true);
+    expect(restored.fullAccess).toBe(false);
     expect(restored.knowledgeEnabled).toBe(true);
     expect(restored.stage).toBe("off");
     expect(restored.planTasks).toEqual([]);
@@ -510,7 +543,7 @@ describe("thread UI state helpers", () => {
   it("keeps the same GPA state reference when durable flags already match", () => {
     const state = normalizeGpaStateForThread("chat", null);
 
-    expect(mergeDurableGpaFlags(state, { fullAccess: false, knowledgeEnabled: false })).toBe(state);
+    expect(mergeDurableGpaFlags(state, { fullAccess: true, knowledgeEnabled: false })).toBe(state);
   });
 
   it("waits for the latest queued full-access write before sending", async () => {
@@ -844,10 +877,16 @@ describe("thread UI state helpers", () => {
     expect(shouldShowTaskProcessing("waiting", false)).toBe(true);
     expect(shouldShowTaskProcessing("idle", true)).toBe(true);
     expect(shouldShowTaskProcessing("idle", false)).toBe(false);
+    // Runtime tool events can beat the thread.updated snapshot; preserve the
+    // active turn until the snapshot catches up so its tool group is not folded.
+    expect(shouldShowTaskProcessing("idle", false, true)).toBe(true);
+    expect(shouldShowTaskProcessing(null, false, true)).toBe(true);
     expect(shouldShowTaskProcessing("completed", true)).toBe(false);
     expect(shouldShowTaskProcessing("completed", false)).toBe(false);
+    expect(shouldShowTaskProcessing("completed", false, true)).toBe(false);
     expect(shouldShowTaskProcessing("failed", true)).toBe(false);
     expect(shouldShowTaskProcessing("failed", false)).toBe(false);
+    expect(shouldShowTaskProcessing("failed", false, true)).toBe(false);
   });
 
   it("keeps a just-submitted message out of the queue during the runtime handoff", () => {
@@ -856,6 +895,14 @@ describe("thread UI state helpers", () => {
     expect(shouldPreservePreparingRuntime("idle", 0, false)).toBe(false);
     expect(shouldPreservePreparingRuntime("completed", 0, false)).toBe(false);
     expect(shouldPreservePreparingRuntime("idle", 1, true)).toBe(false);
+  });
+
+  it("keeps observed runtime work through a stale idle snapshot", () => {
+    expect(shouldPreserveObservedRuntime("idle", true, false)).toBe(true);
+    expect(shouldPreserveObservedRuntime("running", true, false)).toBe(false);
+    expect(shouldPreserveObservedRuntime("completed", true, false)).toBe(false);
+    expect(shouldPreserveObservedRuntime("idle", true, true)).toBe(false);
+    expect(shouldPreserveObservedRuntime("idle", false, false)).toBe(false);
   });
 
   it("shows a spinner affordance for executing history items", () => {
@@ -1062,6 +1109,45 @@ describe("runtime activity visibility", () => {
   it("only keeps the execution heartbeat visible while the task is still active", () => {
     expect(shouldShowRuntimeActivityPanel(true)).toBe(true);
     expect(shouldShowRuntimeActivityPanel(false)).toBe(false);
+  });
+
+  it("merges adjacent terminal chunks and preserves command boundaries", () => {
+    const output = (id: string, label: string, content: string): RuntimeActivityOutput => ({
+      id,
+      kind: "output",
+      label,
+      content,
+      createdAt: `2026-10-13T10:00:0${id.length}.000Z`
+    });
+    const first = appendRuntimeOutputBatch(undefined, "thread-a", [output("one", "$ build", "part 1")]);
+    const second = appendRuntimeOutputBatch(first, "thread-a", [
+      output("two", "$ build", " + part 2"),
+      output("three", "$ test", "test output")
+    ]);
+
+    expect(second.entries).toEqual([
+      { ...output("one", "$ build", "part 1"), content: "part 1 + part 2" },
+      output("three", "$ test", "test output")
+    ]);
+  });
+
+  it("bounds long output rows and retains the existing activity start time", () => {
+    const output = (content: string): RuntimeActivityOutput => ({
+      id: "output-1",
+      kind: "output",
+      label: "终端输出",
+      content,
+      createdAt: "2026-10-13T10:00:01.000Z"
+    });
+    const existing = {
+      threadId: "thread-a",
+      startedAt: "2026-10-13T09:59:00.000Z",
+      entries: []
+    };
+    const activity = appendRuntimeOutputBatch(existing, "thread-a", [output("x".repeat(MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS + 10))]);
+
+    expect(activity.startedAt).toBe(existing.startedAt);
+    expect((activity.entries[0] as RuntimeActivityOutput).content).toBe("x".repeat(MAX_RUNTIME_ACTIVITY_OUTPUT_CHARS));
   });
 });
 
@@ -1346,6 +1432,8 @@ describe("tool timeline grouping", () => {
     expect(fileSummary).toBeDefined();
     expect(toolGroup).toBeDefined();
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(fileSummary!, section, new Set([section!.id]))).toBe(true);
+    // Tool activity is part of the folded process, not of the settled answer: it
+    // disappears with the collapsed turn and returns when the turn is expanded.
     expect(shouldKeepTimelineEntryWhenTurnCollapsed(toolGroup!, section, new Set([section!.id]))).toBe(false);
   });
 
@@ -2063,6 +2151,45 @@ describe("assistant draft lifecycle", () => {
     expect(reconcileAssistantDraftUpdate({ [newer.draftId]: newer }, older)).toEqual({ [newer.draftId]: newer });
   });
 
+  it("applies only the newest queued draft update while preserving the active draft", () => {
+    const base = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "第一段",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: false
+    };
+    const next = applyAssistantDraftUpdateBatch({ [base.draftId]: base }, [
+      { ...base, content: "第一段第二段" },
+      { ...base, content: "第一段第二段第三段", phase: "validating" }
+    ]);
+
+    expect(next).toEqual({
+      [base.draftId]: { ...base, content: "第一段第二段第三段", phase: "validating" }
+    });
+  });
+
+  it("does not let a delayed batch revive a completed draft", () => {
+    const completed = {
+      draftId: "draft-1",
+      sequence: 1,
+      threadId: "thread-1",
+      turnRunId: "active-turn",
+      content: "最终回复",
+      phase: "generating" as const,
+      startedAt: "2026-07-27T07:25:28.000Z",
+      completed: true,
+      messageId: "message-1"
+    };
+
+    expect(applyAssistantDraftUpdateBatch({ [completed.draftId]: completed }, [
+      { ...completed, content: "迟到片段", completed: false, messageId: undefined }
+    ])).toEqual({ [completed.draftId]: completed });
+  });
+
   it("replaces an older same-thread draft when the next model request starts", () => {
     const older = {
       draftId: "draft-1",
@@ -2260,6 +2387,23 @@ describe("incremental snapshot merging", () => {
     };
 
     expect(upsertRuntimeToolCallSummary([older], running)).toEqual([older, running]);
+  });
+
+  it("does not let a stale snapshot roll a completed tool call back to running", () => {
+    const asSummary = (overrides: Partial<ToolCallRecord>): ToolCallSummary => ({
+      ...makeToolCall(overrides),
+      resultSize: 0,
+      hasFullResult: true
+    });
+    const running = asSummary({ status: "running", resultJson: null, completedAt: null });
+    const completed = asSummary({
+      status: "completed",
+      resultJson: "{\"ok\":true}",
+      completedAt: "2026-07-15T00:00:03.000Z"
+    });
+
+    expect(mergeRuntimeToolCallSummaries([running], [completed])).toEqual([completed]);
+    expect(mergeRuntimeToolCallSummaries([completed], [running])).toEqual([completed]);
   });
 
   it("completes an existing live tool without losing its arguments", () => {

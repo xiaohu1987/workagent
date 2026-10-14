@@ -442,6 +442,22 @@ export function ApiCardMessage({
                 setGlobalError(null);
               }}
             />
+            <div className="api-card-actions">
+              <button type="button" className="api-card-button is-ghost" disabled={loading} onClick={handleReset}>
+                重置
+              </button>
+              <button
+                type="button"
+                className="api-card-button is-primary"
+                disabled={loading}
+                onClick={() => {
+                  void handleSubmit();
+                }}
+              >
+                {loading ? <span className="api-card-spinner" aria-hidden="true" /> : null}
+                {loading ? "请求中…" : "发送"}
+              </button>
+            </div>
           </div>
           {config.auth ? (
             <div className="api-card-auth">
@@ -542,22 +558,6 @@ export function ApiCardMessage({
               )}
             </div>
           ) : null}
-          <div className="api-card-actions">
-            <button type="button" className="api-card-button is-ghost" disabled={loading} onClick={handleReset}>
-              重置
-            </button>
-            <button
-              type="button"
-              className="api-card-button is-primary"
-              disabled={loading}
-              onClick={() => {
-                void handleSubmit();
-              }}
-            >
-              {loading ? <span className="api-card-spinner" aria-hidden="true" /> : null}
-              {loading ? "请求中…" : "确定"}
-            </button>
-          </div>
           {globalError ? (
             <div className="api-card-call-error" role="alert">
               {globalError}

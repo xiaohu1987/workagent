@@ -54,4 +54,32 @@ describe("thread workspace roots", () => {
     databases.push(db);
     expect(db.getThread("legacy").workspaceRoots).toEqual([dir]);
   });
+
+  it("keeps the original updatedAt when only collaboration roots change", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "codexh-workspace-roots-updated-"));
+    tempDirs.push(dir);
+    const db = new DatabaseService(path.join(dir, "state.sqlite"));
+    databases.push(db);
+    const primary = path.join(dir, "primary");
+    const secondary = path.join(dir, "secondary");
+    await fs.mkdir(primary);
+    await fs.mkdir(secondary);
+    const thread = db.createThread({
+      title: "协作",
+      mode: "project",
+      workspaceKind: "project",
+      cwd: primary,
+      workspaceRoots: [primary],
+      modelId: "model",
+      providerId: "provider"
+    });
+    const before = db.getThread(thread.id).updatedAt;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const updated = db.setThreadWorkspaceRoots(thread.id, [primary, secondary]);
+
+    expect(updated.workspaceRoots).toEqual([primary, secondary]);
+    expect(updated.updatedAt).toBe(before);
+    expect(db.getThread(thread.id).updatedAt).toBe(before);
+  });
 });

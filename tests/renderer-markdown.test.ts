@@ -14,12 +14,15 @@ import {
 } from "../apps/desktop/src/renderer/lib/project-files";
 import {
   buildContextUsage,
+  buildContextUsageHistory,
   buildPlanTimelineItems,
   collectFileChangesByTurn,
   getActivePlanTimelineItem,
   getGpaPlanMessageId,
   getLatestTurnRunId,
   formatComposerAttachments,
+  estimateContextTokens,
+  estimateContextTokensWithPending,
   retainPersistentComposerContexts
 } from "../apps/desktop/src/renderer/lib/conversation-utils";
 import { getFileChangeLineCounts, getVisibleFileChanges, resolveFileSnapshotFromToolDetails } from "../apps/desktop/src/renderer/timeline/conversation-rail";
@@ -369,6 +372,63 @@ describe("parseMarkdownBlocks", () => {
     expect(usage.percentage).toBeGreaterThan(0);
     expect(usage.percentage).toBeLessThanOrEqual(100);
     expect(usage.segments.map((segment) => segment.label)).toContain("对话与工具结果");
+  });
+
+  it("keeps the cached context estimate equivalent to joining and trimming the full history", () => {
+    const messages = [
+      { content: "  old history  ", createdAt: "2026-07-13T12:00:00.000Z" },
+      { content: "\t近期消息 🌟\n", createdAt: "2026-07-13T12:30:00.000Z" },
+      { content: "   ", createdAt: "2026-07-13T12:31:00.000Z" }
+    ] as any[];
+    const toolCalls = [
+      { argumentsJson: "旧参数", startedAt: "2026-07-13T12:01:00.000Z" },
+      { argumentsJson: "  {\"query\":\"你好\"}  ", startedAt: "2026-07-13T12:32:00.000Z" }
+    ] as any[];
+    const compaction = {
+      turnRunId: "turn-1",
+      contextWindow: 128_000,
+      threshold: 0.9,
+      target: 0.6,
+      beforeTokens: 50_000,
+      afterTokens: 20_000,
+      messagesBefore: 8,
+      messagesAfter: 3,
+      createdAt: "2026-07-13T12:20:00.000Z"
+    } as any;
+    const pendingInputs = ["", " ", "  新输入  ", "\t\n", "\u2003你好😀  "];
+
+    for (const activeCompaction of [null, compaction]) {
+      const history = buildContextUsageHistory(messages, toolCalls, activeCompaction);
+      const keptMessages = activeCompaction
+        ? messages.filter((message) => Date.parse(message.createdAt) > Date.parse(activeCompaction.createdAt))
+        : messages;
+      const keptToolCalls = activeCompaction
+        ? toolCalls.filter((toolCall) => Date.parse(toolCall.completedAt ?? toolCall.startedAt) > Date.parse(activeCompaction.createdAt))
+        : toolCalls;
+
+      for (const pendingInput of pendingInputs) {
+        const fullHistoryText = [
+          ...keptMessages.map((message) => message.content),
+          ...keptToolCalls.map((toolCall) => toolCall.argumentsJson),
+          pendingInput
+        ].join("\n");
+        const contextInput = {
+          contextWindow: 128_000,
+          messages,
+          toolCalls,
+          gpaStage: "off" as const,
+          selectedSkillCount: 0,
+          mcpServerCount: 0,
+          pendingInput,
+          compaction: activeCompaction
+        };
+
+        expect(estimateContextTokensWithPending(history, pendingInput)).toBe(estimateContextTokens(fullHistoryText));
+        expect(buildContextUsage({ ...contextInput, history }).usedTokens).toBe(
+          buildContextUsage(contextInput).usedTokens
+        );
+      }
+    }
   });
 
   it("prefers runtime token and provider byte measurements over fixed UI estimates", () => {

@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ToolCallSummary } from "@shared-types";
+import type { ToolCallRecord, ToolCallSummary } from "@shared-types";
 import { DatabaseExecutionDetails, getConciseToolActivityLabel, getDatabaseExecutionDetails, getResolvedToolActivityCommand, getToolActivityMetric, ToolActivityGroup, ToolActivityMetricLabel, ToolActivityStatusDot } from "../apps/desktop/src/renderer/timeline/transcript";
 
 const timelineCss = readFileSync(new URL("../apps/desktop/src/renderer/timeline.css", import.meta.url), "utf8");
@@ -85,6 +85,14 @@ describe("ToolActivityGroup", () => {
 
     expect(html).not.toContain('open=""');
     expect(html).not.toContain("tool-activity-details-shell");
+    expect(html).not.toContain("tool-activity-row compact");
+  });
+
+  it("keeps the default closed in the component update path", () => {
+    const transcriptSource = readFileSync(new URL("../apps/desktop/src/renderer/timeline/transcript.tsx", import.meta.url), "utf8");
+
+    expect(transcriptSource).toContain("const [isOpen, setIsOpen] = useState(false);");
+    expect(transcriptSource).not.toContain("resolveToolActivityGroupOpenState");
   });
 
   it("keeps long expanded tool histories inside a bounded scroll area", () => {

@@ -52,7 +52,8 @@ describe("transcript entry motion", () => {
     expect(block).toContain("animation: none;");
     expect(block).toContain(".task-timeline .message-card,");
     expect(block).toContain(".task-timeline .message-card.assistant.is-finalizing-from-draft");
-    expect(block).toContain(".task-timeline .message-card.user.is-sending");
+    expect(timelineCss).not.toContain("@keyframes user-message-send");
+    expect(block).not.toContain(".task-timeline .message-card.user.is-sending");
   });
 
   it("keeps the tail of the transcript out of content-visibility skipping", () => {

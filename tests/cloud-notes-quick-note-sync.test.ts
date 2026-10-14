@@ -10,7 +10,7 @@ const backendSource = readSource("../apps/desktop/src/main/app.ts");
 const ipcSource = readSource("../apps/desktop/src/main/index.ts");
 const preloadSource = readSource("../apps/desktop/src/preload/index.ts");
 const quickNotesHook = readSource("../apps/desktop/src/renderer/hooks/use-quick-notes.ts");
-const quickNotesSheet = readSource("../apps/desktop/src/renderer/workspace/quick-notes-sheet.tsx");
+const quickNotesPanel = readSource("../apps/desktop/src/renderer/workspace/quick-notes-panel.tsx");
 const cloudNotesPage = readSource(
   "../apps/desktop/src/renderer/settings/pages/connections/cloud-notes-page.tsx"
 );
@@ -78,9 +78,9 @@ describe("云笔记与随手记的双向同步", () => {
   it("随手记界面提供「同步到云笔记」与关联状态", () => {
     expect(quickNotesHook).toContain("async function syncToCloud()");
     expect(quickNotesHook).toContain("window.codexh.syncQuickNoteToCloud(selectedId)");
-    expect(quickNotesSheet).toContain("同步到云笔记");
-    expect(quickNotesSheet).toContain("已关联云笔记");
-    expect(quickNotesSheet).toContain("cloudNoteId, syncingCloud, onSyncToCloud");
+    expect(quickNotesPanel).toContain("同步到云笔记");
+    expect(quickNotesPanel).toContain("已关联云笔记");
+    expect(quickNotesPanel).toContain("cloudNoteId, syncingCloud, onSyncToCloud");
   });
 
   it("云笔记页面：未登录只看注册登录，登录后是列表加账号", () => {

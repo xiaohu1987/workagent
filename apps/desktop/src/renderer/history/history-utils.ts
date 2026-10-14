@@ -19,6 +19,30 @@ export function normalizeHistoryGroupKey(cwd: string): string {
   return cwd.replace(/\\/g, "/").toLocaleLowerCase();
 }
 
+function parseHistoryTimestamp(value: string | null | undefined): number {
+  const parsed = Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Orders history rows by their most recent conversation so the chat the user
+ * just talked in floats to the top. Pinned rows stay above the others and keep
+ * their own pin recency order.
+ */
+export function sortHistoryThreadsByRecentActivity(threads: readonly ThreadRecord[]): ThreadRecord[] {
+  return [...threads].sort((left, right) => {
+    const pinDelta = Number(Boolean(right.isPinned)) - Number(Boolean(left.isPinned));
+    if (pinDelta !== 0) return pinDelta;
+    if (left.isPinned && right.isPinned) {
+      const pinRecencyDelta = parseHistoryTimestamp(right.pinnedAt) - parseHistoryTimestamp(left.pinnedAt);
+      if (pinRecencyDelta !== 0) return pinRecencyDelta;
+    }
+    const activityDelta = parseHistoryTimestamp(right.updatedAt) - parseHistoryTimestamp(left.updatedAt);
+    if (activityDelta !== 0) return activityDelta;
+    return parseHistoryTimestamp(right.createdAt) - parseHistoryTimestamp(left.createdAt);
+  });
+}
+
 export function readStoredStringSet(key: string): Set<string> {
   try {
     const raw = window.localStorage.getItem(key);
@@ -93,10 +117,16 @@ export function historyDeleteGhostCopy(
   return { label: `${target.threadIds.length} 个聊天记录`, detail: "拖到垃圾桶删除" };
 }
 
+type HistoryDeleteDragTargetLike = {
+  closest?: (selector: string) => unknown;
+  parentElement?: { closest?: (selector: string) => unknown } | null;
+};
+
 export function shouldIgnoreHistoryDeleteDragFrom(
-  target: { closest?: (selector: string) => unknown; parentElement?: { closest?: (selector: string) => unknown } } | null | undefined
+  target: EventTarget | HistoryDeleteDragTargetLike | null | undefined
 ): boolean {
-  const element = typeof target?.closest === "function" ? target : target?.parentElement;
+  const candidate = target && typeof target === "object" ? target as HistoryDeleteDragTargetLike : null;
+  const element = typeof candidate?.closest === "function" ? candidate : candidate?.parentElement;
   return typeof element?.closest === "function" && Boolean(element.closest(HISTORY_DELETE_DRAG_IGNORE_SELECTOR));
 }
 

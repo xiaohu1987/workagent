@@ -47,3 +47,15 @@ describe("默认页面上的操作不再把用户定位到某个任务", () => {
     }
   });
 });
+
+describe("新建任务首次发送", () => {
+  it("在等待创建线程期间先退出空白新任务布局", () => {
+    const source = topLevelFunctionSource("sendMessage");
+    const closeLayout = source.indexOf("setIsNewTaskComposerOpen(false);");
+    const createThread = source.indexOf("await createThreadRecord(");
+
+    expect(closeLayout).toBeGreaterThanOrEqual(0);
+    expect(createThread).toBeGreaterThan(closeLayout);
+    expect(source.slice(Math.max(0, closeLayout - 180), closeLayout)).toContain("!targetThreadId");
+  });
+});

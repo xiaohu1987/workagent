@@ -3,10 +3,18 @@ import {
   filterApiCardFavorites,
   removeApiCardFavorite,
   renameApiCardFavorite,
+  updateApiCardFavoriteConfig,
   useApiCardFavorites,
   type ApiCardFavorite
 } from "../api-card-favorites";
+import { IconRename, IconSearch, IconTrash } from "../icons";
 import { ApiCardMessage, ApiCardThreadContext } from "../cards/api-card-message";
+import {
+  ApiFavoritesCardEdit,
+  createApiCardEditDraft,
+  resolveApiCardEditDraft,
+  type ApiCardEditDraft
+} from "./api-favorites-card-edit";
 
 function formatFavoriteTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -14,157 +22,242 @@ function formatFavoriteTime(timestamp: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+type FavoritesSidebarProps = {
+  favorites: ApiCardFavorite[];
+  visible: ApiCardFavorite[];
+  query: string;
+  selectedId: string | null;
+  onQueryChange: (value: string) => void;
+  onSelect: (id: string) => void;
+  onStartEdit: (favorite: ApiCardFavorite) => void;
+  onDelete: (favorite: ApiCardFavorite) => void;
+};
+
+/** 左栏：搜索框 + 收藏列表；条目左侧是标题与元信息，右侧贴边放编辑与删除图标。 */
+function FavoritesSidebar({ favorites, visible, query, selectedId, onQueryChange, onSelect, onStartEdit, onDelete }: FavoritesSidebarProps) {
+  return (
+    <aside className="quick-notes-list">
+      <div className="quick-notes-list-header">
+        <span>收藏</span>
+        <span className="quick-notes-header-status">{favorites.length} 张卡片</span>
+      </div>
+      <span className="api-favorites-search-wrap">
+        <span className="api-favorites-search-icon" aria-hidden="true">
+          <IconSearch />
+        </span>
+        <input
+          className="form-input api-favorites-search"
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="搜索名称或调用 URL"
+          aria-label="搜索收藏卡片"
+        />
+      </span>
+      {visible.length ? (
+        <div className="quick-notes-items" aria-label="接口卡片收藏列表">
+          {visible.map((favorite) => (
+            <div
+              key={favorite.id}
+              className={`quick-notes-item ${selectedId === favorite.id ? "selected" : ""}`}
+              data-method={favorite.config.method.toLowerCase()}
+            >
+              {/* 行主体负责选中；图标按钮独立成组，避免按钮嵌套按钮。 */}
+              <button
+                type="button"
+                className="api-favorites-item-main"
+                onClick={() => onSelect(favorite.id)}
+              >
+                <strong>{favorite.name}</strong>
+                <span className="quick-notes-item-meta">
+                  <span className="api-favorites-method">{favorite.config.method}</span>
+                  <span className="quick-notes-item-time">{formatFavoriteTime(favorite.createdAt)}</span>
+                </span>
+              </button>
+              <span className="api-favorites-item-actions">
+                <button
+                  type="button"
+                  className="api-favorites-icon-button"
+                  title="编辑卡片"
+                  aria-label={`编辑 ${favorite.name}`}
+                  onClick={() => onStartEdit(favorite)}
+                >
+                  <IconRename />
+                </button>
+                <button
+                  type="button"
+                  className="api-favorites-icon-button is-danger"
+                  title="删除收藏"
+                  aria-label={`删除 ${favorite.name}`}
+                  onClick={() => onDelete(favorite)}
+                >
+                  <IconTrash />
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="quick-notes-empty">
+          {favorites.length ? "没有匹配的收藏，换个名称或 URL 关键词试试。" : "在聊天中的 API 卡片右上角点击星标即可收藏。"}
+        </div>
+      )}
+      <p className="api-favorites-hint">点击条目查看详情，收藏的卡片可以直接填参调用。</p>
+    </aside>
+  );
+}
+
+type FavoritesDetailProps = {
+  selected: ApiCardFavorite | null;
+  draft: ApiCardEditDraft | null;
+  editError: string | null;
+  threadId: string | null;
+  onInsert?: (favorite: ApiCardFavorite) => void;
+  onEditChange: (patch: Partial<ApiCardEditDraft>) => void;
+  onSaveEdit: () => void;
+  onCancelEdit: () => void;
+};
+
+/** 右栏：选中卡片的信息栏、完整卡片与底部操作，骨架与随手记编辑器一致。 */
+function FavoritesDetail({ selected, draft, editError, threadId, onInsert, onEditChange, onSaveEdit, onCancelEdit }: FavoritesDetailProps) {
+  if (!selected) {
+    return (
+      <section className="quick-notes-editor" aria-label="接口卡片详情">
+        <div className="quick-notes-empty">从左侧列表选一张收藏，在这里查看详情并直接调用。</div>
+      </section>
+    );
+  }
+
+  /** 草稿只属于选中的那张收藏，切换条目后草稿失效即视为退出编辑。 */
+  const editing = draft !== null && draft.id === selected.id;
+
+  return (
+    <section className="quick-notes-editor" aria-label="接口卡片详情">
+      <div className="quick-notes-markdown-bar" aria-label="接口卡片信息">
+        <strong>{selected.config.method}</strong>
+        <span>{selected.config.url}</span>
+      </div>
+      <div className="api-favorites-detail-title">
+        <strong className="api-favorites-detail-name" title={selected.name}>
+          {selected.name}
+        </strong>
+        {selected.config.auth ? <span className="api-favorites-chip is-auth">需要授权</span> : null}
+        {selected.config.fields.length > 0 ? (
+          <span className="api-favorites-chip">{selected.config.fields.length} 个参数</span>
+        ) : null}
+      </div>
+      <div className="api-favorites-card-editor">
+        {editing && draft ? (
+          <ApiFavoritesCardEdit draft={draft} error={editError} onChange={onEditChange} />
+        ) : (
+          <ApiCardThreadContext.Provider value={threadId ?? null}>
+            <ApiCardMessage key={selected.id} configText={JSON.stringify(selected.config)} />
+          </ApiCardThreadContext.Provider>
+        )}
+      </div>
+      <footer className="quick-notes-footer">
+        <span className="quick-notes-status">
+          {editing ? "改动只保存在收藏里，保存后立即生效。" : `收藏于 ${formatFavoriteTime(selected.createdAt)}`}
+        </span>
+        <div className="quick-notes-footer-actions">
+          {editing ? (
+            <>
+              <button type="button" className="button secondary" onClick={onCancelEdit}>
+                取消
+              </button>
+              <button type="button" className="button primary" onClick={onSaveEdit}>
+                保存
+              </button>
+            </>
+          ) : onInsert ? (
+            <button type="button" className="button primary" onClick={() => onInsert(selected)}>
+              发送到聊天
+            </button>
+          ) : null}
+        </div>
+      </footer>
+    </section>
+  );
+}
+
 export function ApiCardFavoritesPanel({
   onInsert,
   threadId
 }: {
-  /** 点击"发送到聊天":把 api-card 块插入聊天输入框 */
+  /** 点击"发送到聊天"：把 api-card 块插入聊天输入框 */
   onInsert?: (favorite: ApiCardFavorite) => void;
   threadId?: string | null;
 }) {
   const favorites = useApiCardFavorites();
   const [query, setQuery] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<ApiCardEditDraft | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const visible = useMemo(() => filterApiCardFavorites(favorites, query), [favorites, query]);
+  const selected = useMemo<ApiCardFavorite | null>(() => {
+    if (visible.length === 0) return null;
+    return visible.find((favorite) => favorite.id === selectedId) ?? visible[0] ?? null;
+  }, [visible, selectedId]);
 
-  function commitRename() {
-    if (editingId) renameApiCardFavorite(editingId, editingName);
-    setEditingId(null);
-    setEditingName("");
+  function startEdit(favorite: ApiCardFavorite) {
+    setDraft(createApiCardEditDraft(favorite));
+    setEditError(null);
+  }
+
+  function cancelEdit() {
+    setDraft(null);
+    setEditError(null);
+  }
+
+  /** 保存：按草稿重建配置并整体校验，通过后写回名称与配置。 */
+  function saveEdit() {
+    if (!draft) return;
+    const favorite = favorites.find((item) => item.id === draft.id);
+    if (!favorite) {
+      cancelEdit();
+      return;
+    }
+    const resolved = resolveApiCardEditDraft(favorite, draft);
+    if (!resolved.ok) {
+      setEditError(resolved.error);
+      return;
+    }
+    if (resolved.name !== favorite.name) renameApiCardFavorite(favorite.id, resolved.name);
+    updateApiCardFavoriteConfig(favorite.id, resolved.config);
+    cancelEdit();
   }
 
   return (
-    <div className="config-block api-favorites-panel">
-      <div className="section-copy">
-        <strong>接口卡片收藏</strong>
-        <span>收藏聊天中的 API 卡片;点击输入框左侧 + 的接口卡片即可搜索并唤出,直接填参调用。</span>
-      </div>
-      <div className="api-favorites-toolbar">
-        <input
-          className="form-input api-favorites-search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="按名称或调用 URL 搜索"
-          aria-label="搜索收藏卡片"
-        />
-        <span className="memory-count-pill">{favorites.length} 张卡片</span>
-      </div>
-      <div className="api-favorites-list" aria-label="接口卡片收藏列表">
-        {visible.map((favorite) => (
-          <article key={favorite.id} className="api-favorites-card">
-            <div className={`api-favorites-card-head${expandedId === favorite.id ? " is-expanded" : ""}`}>
-              <span className={`api-card-method is-${favorite.config.method.toLowerCase()}`}>
-                {favorite.config.method}
-              </span>
-              <div className="api-favorites-card-copy">
-                {editingId === favorite.id ? (
-                  <input
-                    className="form-input api-favorites-rename-input"
-                    value={editingName}
-                    autoFocus
-                    onChange={(event) => setEditingName(event.target.value)}
-                    onBlur={commitRename}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") commitRename();
-                      if (event.key === "Escape") {
-                        setEditingId(null);
-                        setEditingName("");
-                      }
-                    }}
-                  />
-                ) : (
-                  <strong
-                    className="api-favorites-card-name"
-                    title="双击重命名"
-                    onDoubleClick={() => {
-                      setEditingId(favorite.id);
-                      setEditingName(favorite.name);
-                    }}
-                  >
-                    {favorite.name}
-                  </strong>
-                )}
-                <span className="api-favorites-card-url" title={favorite.config.url}>
-                  {favorite.config.url}
-                </span>
-                <span className="api-favorites-card-meta">
-                  收藏于 {formatFavoriteTime(favorite.createdAt)}
-                  {favorite.config.auth ? " · 需要授权" : ""}
-                  {favorite.config.fields.length > 0 ? ` · ${favorite.config.fields.length} 个参数` : ""}
-                </span>
-              </div>
-              <div className="api-favorites-card-actions">
-                <button
-                  className="button ghost"
-                  type="button"
-                  title={expandedId === favorite.id ? "收起完整卡片" : "展开并编辑完整卡片"}
-                  aria-expanded={expandedId === favorite.id}
-                  onClick={() => setExpandedId((current) => current === favorite.id ? null : favorite.id)}
-                >
-                  <span>{expandedId === favorite.id ? "收起" : "编辑调用"}</span>
-                </button>
-                {onInsert ? (
-                  <button
-                    className="button ghost"
-                    type="button"
-                    title="把卡片发送到当前聊天输入框"
-                    onClick={() => onInsert(favorite)}
-                  >
-                    <span>发送到聊天</span>
-                  </button>
-                ) : null}
-                <button
-                  className="button ghost"
-                  type="button"
-                  title="重命名"
-                  onClick={() => {
-                    setEditingId(favorite.id);
-                    setEditingName(favorite.name);
-                  }}
-                >
-                  <span>重命名</span>
-                </button>
-                <button
-                  className="button ghost danger-icon-button"
-                  type="button"
-                  title="删除收藏"
-                  onClick={() => removeApiCardFavorite(favorite.id)}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m3 0v12a2 2 0 01-2 2H8a2 2 0 01-2-2V7" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            {expandedId === favorite.id ? (
-              <div className="api-favorites-card-editor">
-                <ApiCardThreadContext.Provider value={threadId ?? null}>
-                  <ApiCardMessage
-                    configText={JSON.stringify(favorite.config)}
-                    onCollapsedChange={(collapsed) => {
-                      if (collapsed) setExpandedId(null);
-                    }}
-                  />
-                </ApiCardThreadContext.Provider>
-              </div>
-            ) : null}
-          </article>
-        ))}
-        {favorites.length === 0 ? (
-          <div className="memory-empty-state">
-            <strong>还没有收藏的卡片</strong>
-            <p>在聊天中的 API 卡片右上角点击星标即可收藏。</p>
-          </div>
-        ) : visible.length === 0 ? (
-          <div className="memory-empty-state">
-            <strong>没有匹配的收藏</strong>
-            <p>换个名称或 URL 关键词试试。</p>
-          </div>
-        ) : null}
-      </div>
+    <div className="quick-notes-layout">
+      <FavoritesSidebar
+        favorites={favorites}
+        visible={visible}
+        query={query}
+        selectedId={selected?.id ?? null}
+        onQueryChange={setQuery}
+        onSelect={(id) => {
+          setSelectedId(id);
+          cancelEdit();
+        }}
+        onStartEdit={(favorite) => {
+          setSelectedId(favorite.id);
+          startEdit(favorite);
+        }}
+        onDelete={(favorite) => {
+          removeApiCardFavorite(favorite.id);
+          if (draft?.id === favorite.id) cancelEdit();
+        }}
+      />
+      <FavoritesDetail
+        selected={selected}
+        draft={draft}
+        editError={editError}
+        threadId={threadId ?? null}
+        onInsert={onInsert}
+        onEditChange={(patch) => setDraft((current) => (current ? { ...current, ...patch } : current))}
+        onSaveEdit={saveEdit}
+        onCancelEdit={cancelEdit}
+      />
     </div>
   );
 }

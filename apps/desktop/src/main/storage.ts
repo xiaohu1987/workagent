@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import TOML from "@iarna/toml";
-import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeResponseTone, normalizeSandboxMode, normalizeSandboxNetworkAccess, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
+import { isGptReasoningEffort, normalizeCompletionAuditSettings, normalizeHiddenSidebarItems, normalizeResponseTone, normalizeSandboxMode, normalizeSandboxNetworkAccess, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, parseTokenUsageJson, withGptReasoningCapabilities } from "@shared-types";
 import { isRootUserRequestMessage } from "./subagent-assignment";
 import type { CloudNoteRecord, CloudNotesAccount } from "./cloud-notes";
 import type {
@@ -332,7 +332,8 @@ export function defaultConfig(): AppConfig {
       completionAudit: normalizeCompletionAuditSettings(),
       sandboxMode: "read-only",
       sandboxNetworkAccess: false,
-      screenshotShortcut: "CommandOrControl+Alt+S"
+      screenshotShortcut: "CommandOrControl+Alt+S",
+      hiddenSidebarItems: []
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -548,7 +549,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       sandboxNetworkAccess: normalizeSandboxNetworkAccess(parsed.desktop?.sandboxNetworkAccess),
       screenshotShortcut: typeof parsed.desktop?.screenshotShortcut === "string"
         ? parsed.desktop.screenshotShortcut.trim().slice(0, 80)
-        : "CommandOrControl+Alt+S"
+        : "CommandOrControl+Alt+S",
+      hiddenSidebarItems: normalizeHiddenSidebarItems(parsed.desktop?.hiddenSidebarItems)
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),
@@ -1386,7 +1388,10 @@ export class DatabaseService {
     this.#db.exec("BEGIN");
     try {
       this.replaceWorkspaceRoots(threadId, workspaceRoots, nowIso());
-      const updated = this.updateThread(threadId, { workspaceRoots });
+      // 改协作目录属于项目级元数据变更，不代表会话里出现了新的用户活动。
+      // 必须沿用原有 updated_at，否则一次保存会把项目下所有会话刷成「刚刚」，
+      // 侧栏的「最后活动」时间与分组排序会整体失真。
+      const updated = this.updateThread(threadId, { workspaceRoots, updatedAt: current.updatedAt });
       this.#db.exec("COMMIT");
       return updated;
     } catch (error) {
