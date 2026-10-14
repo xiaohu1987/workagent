@@ -1507,7 +1507,7 @@ export function App() {
     };
   }, [resizingPane, rightWorkspaceWidth, sidebarWidth]);
 
-  function selectThreadId(nextThreadId: string | null) {
+  function selectThreadId(nextThreadId: string | null, options?: { keepNewTaskLayout?: boolean }) {
     const previousThreadId = selectedThreadIdRef.current;
     if (previousThreadId !== nextThreadId) {
       // A slow response for the previous transcript must never win after the
@@ -1520,7 +1520,10 @@ export function App() {
       selectedThreadIdRef.current = nextThreadId;
       setSelectedThreadId(nextThreadId);
       setFilePreviewPath(null);
-      if (nextThreadId) setIsNewTaskComposerOpen(false);
+      // The first send from the blank new-task layout keeps that layout on
+      // screen until the transcript view is committed. Closing it here would
+      // uncover the welcome page for the frames the thread creation IPC takes.
+      if (nextThreadId && !options?.keepNewTaskLayout) setIsNewTaskComposerOpen(false);
     };
     if (selectedThreadIdRef.current === nextThreadId) {
       select();
@@ -5960,12 +5963,9 @@ export function App() {
     }
 
     if (!options?.internal) {
-      // Leave the blank new-task layout before waiting for the thread to be
-      // created. Otherwise the async create call leaves the old landing page
-      // visible for a frame while the first message is already submitting.
-      if (!targetThreadId && isNewTaskComposerOpen) {
-        setIsNewTaskComposerOpen(false);
-      }
+      // The blank new-task layout stays on screen while the thread is created
+      // (see the keepNewTaskLayout call below). Removing it here would uncover
+      // the welcome view for the frames the thread creation IPC takes.
       setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString() });
     }
 
@@ -5981,7 +5981,10 @@ export function App() {
         title: "新建任务"
       });
       threadId = thread.id;
-      selectThreadId(thread.id);
+      // Keep the blank new-task layout covering the chat area until the seeded
+      // snapshot and the in-flight submission resolve the view to the
+      // transcript; dropping it earlier flashes the welcome page.
+      selectThreadId(thread.id, { keepNewTaskLayout: true });
       seedOptimisticThreadSnapshot(thread);
       if (isNewTaskComposerOpen) setIsNewTaskComposerOpen(false);
       if (branchToApply) {
@@ -8497,7 +8500,7 @@ export function App() {
                 <ResponseTonePage configDraft={configDraft} options={RESPONSE_TONE_OPTIONS} defaultTone={DEFAULT_RESPONSE_TONE} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 
-              {settingsTab === "general" && configDraft ? (
+              {settingsTab === "gadgets" && configDraft ? (
                 <SidebarNavPage configDraft={configDraft} setConfigDraft={setConfigDraft} onSave={saveConfigDraft} />
               ) : null}
 

@@ -49,13 +49,26 @@ describe("默认页面上的操作不再把用户定位到某个任务", () => {
 });
 
 describe("新建任务首次发送", () => {
-  it("在等待创建线程期间先退出空白新任务布局", () => {
+  it("等待创建线程期间保留空白新任务布局，避免先露出旧欢迎页", () => {
     const source = topLevelFunctionSource("sendMessage");
-    const closeLayout = source.indexOf("setIsNewTaskComposerOpen(false);");
     const createThread = source.indexOf("await createThreadRecord(");
+    const selectWithLayout = source.indexOf("selectThreadId(thread.id, { keepNewTaskLayout: true });");
+    const seed = source.indexOf("seedOptimisticThreadSnapshot(thread);");
+    const closeLayout = source.indexOf("if (isNewTaskComposerOpen) setIsNewTaskComposerOpen(false);");
 
-    expect(closeLayout).toBeGreaterThanOrEqual(0);
-    expect(createThread).toBeGreaterThan(closeLayout);
-    expect(source.slice(Math.max(0, closeLayout - 180), closeLayout)).toContain("!targetThreadId");
+    expect(createThread).toBeGreaterThan(0);
+    // 建线程之前不得撤掉空白布局：此时 selectedThreadId 仍为 null，视图判定
+    // 会回落到 welcome，旧的初始欢迎页就会闪一帧。
+    expect(source.slice(0, createThread)).not.toContain("setIsNewTaskComposerOpen(false);");
+    expect(selectWithLayout).toBeGreaterThan(createThread);
+    expect(seed).toBeGreaterThan(selectWithLayout);
+    // 视图已切到会话内容之后再撤掉空白布局。
+    expect(closeLayout).toBeGreaterThan(seed);
+  });
+
+  it("线程切换入口默认仍会关闭空白新任务布局", () => {
+    const selectSource = topLevelFunctionSource("selectThreadId");
+    expect(selectSource).toContain("keepNewTaskLayout");
+    expect(selectSource).toContain("if (nextThreadId && !options?.keepNewTaskLayout) setIsNewTaskComposerOpen(false);");
   });
 });

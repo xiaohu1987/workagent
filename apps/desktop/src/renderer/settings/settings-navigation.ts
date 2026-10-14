@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconGear, IconGlobe, IconKnowledge, IconMcp, IconSinglePanel, IconSkills } from "../icons";
+import { IconChecklist, IconGear, IconGlobe, IconKnowledge, IconMcp, IconSinglePanel, IconSkills } from "../icons";
 import type { SettingsTab } from "../core/app-types";
 
 export type SettingsMenuGroup = {
@@ -12,6 +12,7 @@ export type SettingsMenuGroup = {
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
   { id: "general", label: "智能运行", hint: "运行概览、输出审计和响应风格" },
+  { id: "gadgets", label: "小工具", hint: "管理侧栏小工具入口：勾选显示在侧栏，未勾选收进「更多」" },
   { id: "provider", label: "供应商设置", hint: "供应商、调用地址、密钥与模型列表" },
   { id: "multimodal", label: "多模态", hint: "配置默认多模态识别、生图与视频模型" },
   { id: "mcp", label: "MCP 管理", hint: "已配置的 MCP 服务" },
@@ -31,6 +32,7 @@ export const SETTINGS_MENU_GROUPS: SettingsMenuGroup[] = [
   { id: "connections", label: "连接", hint: "云笔记、MCP 与数据库", tabs: ["mcp", "database", "cloudNotes"], icon: IconMcp },
   { id: "knowledge", label: "知识与记忆", hint: "知识库与记忆", tabs: ["knowledge", "memory"], icon: IconKnowledge },
   { id: "capabilities", label: "能力中心", hint: "技能与插件", tabs: ["capabilities"], icon: IconSkills },
+  { id: "gadgets", label: "小工具", hint: "侧栏小工具入口", tabs: ["gadgets"], icon: IconChecklist },
   { id: "application", label: "应用", hint: "外观、统计与更新", tabs: ["appearance", "usage", "update"], icon: IconSinglePanel }
 ];
 
@@ -46,6 +48,7 @@ export function getSettingsTitle(tab: SettingsTab): string {
     case "memory": return "记忆";
     case "cloudNotes": return "云笔记";
     case "general": return "智能运行";
+    case "gadgets": return "小工具";
     case "update": return "应用更新";
     default: return "设置";
   }

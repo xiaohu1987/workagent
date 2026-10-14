@@ -18677,6 +18677,68 @@ body.panel-resizing {
 
 .general-tone-settings { gap: 12px; }
 .general-tone-settings > .section-copy { gap: 4px; }
+
+/* Gadgets ("小工具") — sidebar entries as square app-icon tiles. */
+.gadgets-settings { gap: 12px; }
+.gadgets-settings > .section-copy { gap: 4px; }
+.gadgets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: 10px;
+}
+.gadget-tile {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 7px;
+  aspect-ratio: 1 / 1;
+  padding: 16px 8px 10px;
+  border: 1px solid rgba(145, 170, 205, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text, #f1f3f6);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+.gadget-tile:hover {
+  border-color: rgba(121, 174, 248, 0.45);
+  background: rgba(121, 174, 248, 0.08);
+  transform: translateY(-1px);
+}
+.gadget-tile:focus-visible { outline: 1px solid rgba(121, 174, 248, 0.7); outline-offset: 2px; }
+.gadget-tile.is-on {
+  border-color: rgba(121, 174, 248, 0.55);
+  background: rgba(121, 174, 248, 0.1);
+}
+.gadget-tile-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(121, 174, 248, 0.22), rgba(121, 174, 248, 0.08));
+  color: #9cc1f9;
+}
+.gadget-tile-icon svg { width: 22px; height: 22px; }
+.gadget-tile-label { font-size: 12px; font-weight: 550; }
+.gadget-tile-state { font-size: 10.5px; color: var(--text-muted, #8f939d); }
+.gadget-tile.is-on .gadget-tile-state { color: #79aef8; }
+.gadget-tile-check {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(145, 170, 205, 0.3);
+  font-size: 10px;
+  line-height: 1;
+  color: transparent;
+}
+.gadget-tile.is-on .gadget-tile-check { border-color: #79aef8; background: #3d76d0; color: #fff; }
 .general-tone-segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -24837,6 +24899,28 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   background: transparent !important;
 }
 
+:root[data-theme="light"] .gadget-tile {
+  border-color: #cfddea;
+  background: #f6fafd;
+  color: var(--text, #1c2530);
+}
+:root[data-theme="light"] .gadget-tile:hover {
+  border-color: #9dcaf0;
+  background: #e2f1ff;
+}
+:root[data-theme="light"] .gadget-tile.is-on {
+  border-color: #79aef8;
+  background: #e2f1ff;
+}
+:root[data-theme="light"] .gadget-tile-icon {
+  background: linear-gradient(160deg, rgba(61, 118, 208, 0.16), rgba(61, 118, 208, 0.07));
+  color: #3d76d0;
+}
+:root[data-theme="light"] .gadget-tile-state { color: #6b7686; }
+:root[data-theme="light"] .gadget-tile.is-on .gadget-tile-state { color: #3d76d0; }
+:root[data-theme="light"] .gadget-tile-check { border-color: #b9cfe6; }
+:root[data-theme="light"] .gadget-tile.is-on .gadget-tile-check { border-color: #3d76d0; background: #3d76d0; color: #fff; }
+
 :root[data-theme="light"] .composer-model-picker-provider.is-active,
 :root[data-theme="light"] .composer-model-picker-model.is-selected,
 :root[data-theme="light"] .composer-select-option.selected {
@@ -30672,7 +30756,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   display: none;
 }
 
-.chat-canvas.is-new-task footer {
+.chat-canvas.is-new-task > footer {
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -30947,14 +31031,25 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 /* 底部一行：状态文字、云笔记标签与按钮全部贴齐编辑区右侧。 */
 .quick-notes-sheet.quick-notes-inline .quick-notes-footer {
-  flex-wrap: wrap;
+  flex-direction: row;
+  flex-wrap: nowrap;
   gap: 8px;
   justify-content: flex-end;
 }
 
+/* 状态文字吃掉左侧剩余空间；首帧宽度未稳定时先自己收缩省略，
+   而不是换行后把按钮挤到下一行中间。 */
 .quick-notes-sheet.quick-notes-inline .quick-notes-status {
   margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
   text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-notes-sheet.quick-notes-inline .quick-notes-footer-actions {
+  flex: 0 0 auto;
 }
 
 /* 删除确认由浮层改为页内确认条。 */
@@ -31325,7 +31420,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 /* ---------------------------------------------------------------------------
    面板铺满聊天区：这几条必须排在文件靠后位置。
-   `.chat-canvas.is-new-task footer { display: flex }` 与下方的隐藏规则特异性相同
+   `.chat-canvas.is-new-task > footer { display: flex }` 与下方的隐藏规则特异性相同
    （均为 0,2,1），若写在文件前部会被它覆盖，打开面板时下方就会漏出新任务页的
    标题、输入框与工作空间选择栏。三个内联面板在这里统一兜底隐藏。
 --------------------------------------------------------------------------- */

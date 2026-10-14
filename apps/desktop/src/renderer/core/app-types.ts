@@ -13,6 +13,7 @@ import type {
 
 export type SettingsTab =
   | "general"
+  | "gadgets"
   | "appearance"
   | "usage"
   | "knowledge"

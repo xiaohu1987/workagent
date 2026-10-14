@@ -152,9 +152,9 @@ describe("接口卡片：侧栏入口 + 聊天区内联面板", () => {
   });
 
   it("新任务页的页脚被排在后面的规则隐藏，面板才能真正铺满", () => {
-    // .chat-canvas.is-new-task footer 把 footer 设成 flex，且与隐藏规则特异性相同；
-    // 隐藏规则必须排在它之后，否则面板下方会漏出欢迎页与输入框。
-    const newTaskFooterRule = styles.indexOf(".chat-canvas.is-new-task footer {");
+    // .chat-canvas.is-new-task > footer 只作用于新任务页自己的底栏，与隐藏规则特异性相同；
+    // 隐藏规则仍必须排在它之后，否则面板下方会漏出欢迎页与输入框。
+    const newTaskFooterRule = styles.indexOf(".chat-canvas.is-new-task > footer {");
     expect(newTaskFooterRule).toBeGreaterThanOrEqual(0);
     const guard = styles.slice(newTaskFooterRule);
     expect(guard).toContain(".chat-canvas.is-api-favorites > footer");

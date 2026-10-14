@@ -91,6 +91,8 @@ describe("随手记：侧栏入口 + 聊天区内联面板", () => {
   it("样式把面板铺满聊天区，并让聊天记录与输入区让位", () => {
     expect(styles).toContain(".chat-canvas.is-quick-notes > .chat-scroll");
     expect(styles).toContain(".chat-canvas.is-quick-notes > footer");
+    // 新任务页的底栏规则必须限定直接子元素，否则会波及面板自己的底栏。
+    expect(styles).toContain(".chat-canvas.is-new-task > footer");
     const inlineRule = section(styles, ".quick-notes-sheet.quick-notes-inline {", "\n}");
     expect(inlineRule).toContain("display: flex");
     expect(inlineRule).toContain("height: 100%");
@@ -98,13 +100,14 @@ describe("随手记：侧栏入口 + 聊天区内联面板", () => {
     expect(styles).toContain(".sidebar-nav-button.is-active");
   });
 
-  it("底部状态与操作整体靠右排列", () => {
+  it("底部状态与操作整体靠右排列，且不会被首帧宽度挤到下一行", () => {
     const footerRule = section(
       styles,
       ".quick-notes-sheet.quick-notes-inline .quick-notes-footer {",
       "\n}"
     );
-    expect(footerRule).toContain("flex-wrap: wrap");
+    expect(footerRule).toContain("flex-wrap: nowrap");
+    expect(footerRule).toContain("flex-direction: row");
     expect(footerRule).toContain("justify-content: flex-end");
 
     const statusRule = section(
@@ -114,6 +117,16 @@ describe("随手记：侧栏入口 + 聊天区内联面板", () => {
     );
     expect(statusRule).toContain("margin-left: auto");
     expect(statusRule).toContain("text-align: right");
+    expect(statusRule).toContain("min-width: 0");
+    expect(statusRule).toContain("text-overflow: ellipsis");
+    expect(statusRule).toContain("white-space: nowrap");
+
+    const actionsRule = section(
+      styles,
+      ".quick-notes-sheet.quick-notes-inline .quick-notes-footer-actions {",
+      "\n}"
+    );
+    expect(actionsRule).toContain("flex: 0 0 auto");
   });
 
   it("点左侧会话或新建任务都能切回聊天，侧栏入口也可再次点击收起", () => {
