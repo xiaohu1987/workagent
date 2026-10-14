@@ -5916,6 +5916,12 @@ export function App() {
     }
 
     if (!options?.internal) {
+      // Leave the blank new-task layout before waiting for the thread to be
+      // created. Otherwise the async create call leaves the old landing page
+      // visible for a frame while the first message is already submitting.
+      if (!targetThreadId && isNewTaskComposerOpen) {
+        setIsNewTaskComposerOpen(false);
+      }
       setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString() });
     }
 
