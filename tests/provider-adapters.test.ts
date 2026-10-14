@@ -2540,10 +2540,10 @@ describe("OpenAiCompatibleProvider", () => {
     const systemContent = mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content as string;
     expect(systemContent).toContain("[Chinese output compatibility]");
     expect(systemContent).toContain("latest user request is in Chinese");
-    expect(systemContent).toContain("MUST also be written directly in Simplified Chinese");
-    expect(systemContent).toContain("Think and write these surfaced thoughts in Simplified Chinese");
+    expect(systemContent).toContain("write every reasoning summary, analysis, plan, process note, and answer draft");
+    expect(systemContent).toContain("Do not emit English natural-language prose in any surfaced reasoning channel");
     expect(systemContent).toContain("reasoning_content");
-    expect(systemContent).toContain("用简体中文思考");
+    expect(systemContent).toContain("过程记录和回答草稿也必须直接使用简体中文");
   });
 
   it("uses Grok's plain-text completion-audit compatibility protocol", async () => {
@@ -4399,11 +4399,13 @@ describe("native provider tool protocols", () => {
     const instructions = mocks.responsesCreate.mock.calls.at(-1)?.[0].instructions as string;
     expect(instructions).toContain("[Chinese output compatibility]");
     expect(instructions).toContain("latest user request is in Chinese");
-    expect(instructions).toContain("MUST also be written directly in Simplified Chinese");
+    expect(instructions).toContain("write every reasoning summary, analysis, plan, process note, and answer draft");
     // GPT streams its chain-of-thought through the Responses reasoning summary,
     // so the reminder must name that channel explicitly instead of only
     // mentioning reasoning_content and <think> blocks.
     expect(instructions).toContain("reasoning_summary_text");
+    expect(instructions).toContain("Do not emit English natural-language prose in any surfaced reasoning channel");
+    expect(instructions).toContain("process note");
     // Appended exactly once, even though several shells re-run the shared hook.
     expect(instructions.split("[Chinese output compatibility]")).toHaveLength(2);
   });
@@ -4421,7 +4423,9 @@ describe("native provider tool protocols", () => {
       provider, stream: false
     });
 
-    expect(mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content).toContain("[Chinese output compatibility]");
+    const systemContent = mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content as string;
+    expect(systemContent).toContain("[Chinese output compatibility]");
+    expect(systemContent).toContain("Do not emit English natural-language prose in any surfaced reasoning channel");
   });
 
   it("does not force Chinese thinking on GPT when the user asks for English", async () => {

@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { RollingStatusText, RuntimeActivityPanel } from "../apps/desktop/src/renderer/cards/runtime-cards";
 import { AssistantDraftMessage, AssistantDraftReasoning } from "../apps/desktop/src/renderer/timeline/transcript";
+import { ThinkingWorkspace } from "../apps/desktop/src/renderer/workspace/thinking-workspace";
 
 const runtimeCards = readFileSync(new URL("../apps/desktop/src/renderer/cards/runtime-cards.tsx", import.meta.url), "utf8");
 
@@ -37,6 +38,21 @@ describe("chat status roll and reasoning placement", () => {
     expect(reply).not.toContain("思考过程");
     expect(reasoning).toContain("思考过程");
     expect(reasoning).toContain("先筛选适合小朋友的款式。");
+  });
+
+  it("renders the model's thinking text, notes, and draft without hiding or replacing them", () => {
+    const markup = renderToStaticMarkup(createElement(ThinkingWorkspace, {
+      text: "I'm considering how to proceed with the commit process and reviewing project rules.",
+      draftText: "I will inspect the repository first.",
+      notes: ["**Inspecting project rules for commit**"],
+      taskRunning: true,
+      streaming: true,
+    }));
+
+    expect(markup).toContain("considering how to proceed");
+    expect(markup).toContain("Inspecting project rules for commit");
+    expect(markup).toContain("I will inspect the repository first");
+    expect(markup).not.toContain("已隐藏");
   });
 
   it("defines the status roll animation", () => {
