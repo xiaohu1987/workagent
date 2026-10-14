@@ -9,6 +9,7 @@ import type {
   ArtifactRecord,
   ContextCompactionRecord,
   ContextMeasurementRecord,
+  DownloadServiceSnapshot,
   GpaStage,
   GpaState,
   GitActionResult,
@@ -216,6 +217,7 @@ import {
 } from "./workspace/usage-stats";
 import { TokenUsagePopover } from "./workspace/token-usage-popover";
 import { DocumentViewerPanel } from "./workspace/document-viewer-panel";
+import { DownloadsPanel } from "./workspace/downloads-panel";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
   subscribeApiCardFavoriteNotices,
@@ -881,6 +883,14 @@ export function App() {
   const [isApiFavoritesOpen, setIsApiFavoritesOpen] = useState(false);
   // 查看文档排在接口卡片下方，同样常驻聊天区，与随手记、接口卡片互斥显示。
   const [isDocumentViewerOpen, setIsDocumentViewerOpen] = useState(false);
+  // 下载小工具：任务快照挂在这层而不是面板内部，入口点开时直接用最新状态渲染。
+  const [isDownloadsPanelOpen, setIsDownloadsPanelOpen] = useState(false);
+  const [downloadsSnapshot, setDownloadsSnapshot] = useState<DownloadServiceSnapshot>({ tasks: [], history: [], defaultDir: "", p2pAvailable: false });
+  useEffect(() => {
+    const dispose = window.codexh.onDownloadState((snapshot) => setDownloadsSnapshot(snapshot));
+    void window.codexh.getDownloadState().then((snapshot) => setDownloadsSnapshot(snapshot)).catch(() => undefined);
+    return dispose;
+  }, []);
   // 页签集合挂在 App 而不是面板内部：切去看任务时面板只是让出聊天区，
   // 面板卸载后已经打开的文档仍留在这一层，再点入口就能接着看。
   const documentTabs = useDocumentTabs(() => setIsDocumentViewerOpen(false));
@@ -3329,7 +3339,7 @@ export function App() {
   const [shareFeedback, setShareFeedback] = useState<ShareBarFeedback>(null);
 
   useEffect(() => {
-    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !isApiFavoritesOpen && !isDocumentViewerOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
+    if (!isSettingsOpen && !isProjectCreateOpen && !projectEditDraft && !projectRemovalTarget && !gpaPlanResumeDialog && !updateConfirmDialog && !historyThreadDeleteConfirmation && !historyBatchDeleteConfirmation && !isClearErrorSolutionsConfirmOpen && !isClearSelfImprovementConfirmOpen && !isClearLogsConfirmOpen && !notice && !filePreviewPath && !isHelpOpen && !isQuickNotesOpen && !isApiFavoritesOpen && !isDocumentViewerOpen && !isDownloadsPanelOpen && !quickNoteDeleteConfirm && !quickNoteListMenu && !isSharing) {
       return;
     }
 
@@ -3367,6 +3377,11 @@ export function App() {
 
         if (isDocumentViewerOpen) {
           requestDocumentViewerClose();
+          return;
+        }
+
+        if (isDownloadsPanelOpen) {
+          setIsDownloadsPanelOpen(false);
           return;
         }
 
@@ -5334,6 +5349,7 @@ export function App() {
     setIsQuickNotesOpen(false);
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
+    setIsDownloadsPanelOpen(false);
     selectThreadId(thread.id);
     seedOptimisticThreadSnapshot(thread);
     // The composer is usable from the optimistic state. Fetch everything else
@@ -5347,6 +5363,7 @@ export function App() {
     setIsQuickNotesOpen(false);
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
+    setIsDownloadsPanelOpen(false);
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
@@ -5540,6 +5557,7 @@ export function App() {
     setIsQuickNotesOpen(false);
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
+    setIsDownloadsPanelOpen(false);
     if (selectedThreadId) selectThreadId(null);
     setInput("");
     setIsNewTaskComposerOpen(true);
@@ -7398,6 +7416,7 @@ export function App() {
   const quickNotesPresence = useMotionPresence(isQuickNotesOpen ? true : null, 220);
   const apiFavoritesPresence = useMotionPresence(isApiFavoritesOpen ? true : null, 220);
   const documentViewerPresence = useMotionPresence(isDocumentViewerOpen ? true : null, 220);
+  const downloadsPanelPresence = useMotionPresence(isDownloadsPanelOpen ? true : null, 220);
   // Sharing reads the same transcript the user sees, so a shared message always
   // matches the rendered answer (tool event blocks are excluded) and the tick
   // boxes line up with the conversation on screen.
@@ -7557,6 +7576,7 @@ export function App() {
     if (isQuickNotesOpen) return Promise.resolve();
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
+    setIsDownloadsPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     return openQuickNotes();
@@ -7569,6 +7589,7 @@ export function App() {
     }
     setIsQuickNotesOpen(false);
     setIsDocumentViewerOpen(false);
+    setIsDownloadsPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     setIsApiFavoritesOpen(true);
@@ -7581,9 +7602,23 @@ export function App() {
     }
     setIsQuickNotesOpen(false);
     setIsApiFavoritesOpen(false);
+    setIsDownloadsPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     setIsDocumentViewerOpen(true);
+  });
+  // 下载入口排在查看文档下方，同样接管聊天区，与其他小工具面板互斥显示。
+  const openDownloadsPanelEvent = useStableEvent(() => {
+    if (isDownloadsPanelOpen) {
+      setIsDownloadsPanelOpen(false);
+      return;
+    }
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    setIsDownloadsPanelOpen(true);
   });
   const openHistorySearchEvent = useStableEvent(openHistorySearch);
   const openSettingsEvent = useStableEvent((tab: SettingsTab) => {
@@ -7737,6 +7772,8 @@ export function App() {
         apiFavoritesActive={isApiFavoritesOpen}
         onOpenDocumentViewer={openDocumentViewerEvent}
         documentViewerActive={isDocumentViewerOpen}
+        onOpenDownloads={openDownloadsPanelEvent}
+        downloadsActive={isDownloadsPanelOpen}
         documentViewerOpenCount={documentTabs.tabs.length}
         hiddenSidebarItems={config?.desktop.hiddenSidebarItems}
         onOpenSearch={openHistorySearchEvent}
@@ -7785,7 +7822,7 @@ export function App() {
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
         ) : null}
-        {isQuickNotesOpen || isApiFavoritesOpen || isDocumentViewerOpen ? null : <WorkspaceControls
+        {isQuickNotesOpen || isApiFavoritesOpen || isDocumentViewerOpen || isDownloadsPanelOpen ? null : <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}
           tokenUsageOpen={isTokenUsagePanelOpen}
           tokenUsageMotionPhase={tokenUsagePanelPresence.value ? tokenUsagePanelPresence.phase : undefined}
@@ -7848,7 +7885,7 @@ export function App() {
           </div>
         ) : null}
 
-        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""} ${isQuickNotesOpen ? "is-quick-notes" : ""} ${isApiFavoritesOpen ? "is-api-favorites" : ""} ${isDocumentViewerOpen ? "is-document-viewer" : ""}`}>
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""} ${isQuickNotesOpen ? "is-quick-notes" : ""} ${isApiFavoritesOpen ? "is-api-favorites" : ""} ${isDocumentViewerOpen ? "is-document-viewer" : ""} ${isDownloadsPanelOpen ? "is-downloads" : ""}`}>
           {quickNotesPresence.value ? (
             <QuickNotesPanel
               motionPhase={quickNotesPresence.phase}
@@ -7897,6 +7934,14 @@ export function App() {
             <DocumentViewerPanel
               motionPhase={documentViewerPresence.phase}
               documents={documentTabs}
+            />
+          ) : null}
+          {downloadsPanelPresence.value ? (
+            <DownloadsPanel
+              motionPhase={downloadsPanelPresence.phase}
+              snapshot={downloadsSnapshot}
+              setSnapshot={setDownloadsSnapshot}
+              onClose={() => setIsDownloadsPanelOpen(false)}
             />
           ) : null}
           <div

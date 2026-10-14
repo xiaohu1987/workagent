@@ -15,6 +15,7 @@ type UpdateState = {
 };
 
 type RendererSkillLabEvent = import("@shared-types").SkillLabEvent;
+type RendererDownloadSnapshot = import("@shared-types").DownloadServiceSnapshot;
 type RendererNotificationNavigationTarget = import("@shared-types").NotificationNavigationTarget;
 type RendererPendingResumeThread = import("@shared-types").PendingResumeThread;
 type RendererRuntimeLogPage = import("@shared-types").RuntimeLogPage;
@@ -354,6 +355,17 @@ declare global {
       downloadUpdate: (payload: { confirmInsecureHttp?: boolean }) => Promise<UpdateState>;
       installUpdate: () => Promise<void>;
       onUpdateState: (listener: (state: UpdateState) => void) => () => void;
+      getDownloadState: () => Promise<RendererDownloadSnapshot>;
+      addDownload: (payload: { url: string; dir?: string }) => Promise<import("@shared-types").DownloadTask>;
+      pauseDownload: (id: string) => Promise<boolean>;
+      resumeDownload: (id: string) => Promise<boolean>;
+      cancelDownload: (id: string) => Promise<void>;
+      removeDownloadHistory: (id: string) => Promise<void>;
+      clearDownloadHistory: () => Promise<void>;
+      chooseDownloadDir: (defaultPath?: string) => Promise<string | null>;
+      setDefaultDownloadDir: (dir: string) => Promise<string>;
+      revealDownload: (filePath: string) => Promise<boolean>;
+      onDownloadState: (listener: (snapshot: RendererDownloadSnapshot) => void) => () => void;
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";

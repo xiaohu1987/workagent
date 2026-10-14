@@ -25,6 +25,7 @@ import {
   type SystemNotificationRequest
 } from "./notification-policy";
 import { UpdateService } from "./update-service";
+import { DownloadService } from "./download-service";
 import { executeHttpRequest, type HttpProxyRequestPayload } from "./http-proxy";
 import { LiveEditPreviewWindow } from "./live-edit-preview-window";
 import { getLiveEditWriteTargets } from "./live-edit-preview-utils";
@@ -58,6 +59,7 @@ let rendererServer: http.Server | null = null;
 let pendingTrayNotificationClick: (() => void) | null = null;
 const backend = new DesktopBackend();
 let updates: UpdateService | null = null;
+let downloads: DownloadService | null = null;
 const runtimeThreadStatuses = new Map<string, ThreadStatus>();
 const deliveredSystemNotificationKeys = new Set<string>();
 let registeredScreenshotShortcut: string | null = null;
@@ -571,6 +573,16 @@ async function createWindow(): Promise<void> {
     emit: (state) => mainWindow?.webContents.send("update:state", state),
     quit: () => quitApplication()
   });
+  // 下载小工具：分段下载 + 断点续传 + 可选 P2P（webtorrent 缺失时自动降级）。
+  downloads = new DownloadService({
+    getDefaultDir: () => backend.getConfig().desktop.downloadDir,
+    dataDir: path.join(app.getPath("userData"), "downloads"),
+    emit: (snapshot) => mainWindow?.webContents.send("downloads:state", snapshot),
+    log: (kind, payload) => backend.appendRuntimeLog(kind, payload)
+  });
+  void downloads.start().catch((error) => {
+    console.error("[downloads] Failed to restore persisted tasks", error);
+  });
   const workArea = screen.getPrimaryDisplay().workArea;
   const preferredWidth = 1212;
   const preferredHeight = 767;
@@ -810,6 +822,39 @@ function registerIpc(): void {
       properties: ["openDirectory", "createDirectory"]
     });
     return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  // 下载小工具：任务队列、历史记录与默认目录。
+  ipcMain.handle("downloads:get-state", () =>
+    downloads?.getSnapshot() ?? { tasks: [], history: [], defaultDir: "", p2pAvailable: false }
+  );
+  ipcMain.handle("downloads:add", (_event, payload: { url: string; dir?: string }) =>
+    downloads!.add(payload)
+  );
+  ipcMain.handle("downloads:pause", (_event, id: string) => {
+    downloads?.pause(id);
+    return true;
+  });
+  ipcMain.handle("downloads:resume", (_event, id: string) => {
+    downloads?.resume(id);
+    return true;
+  });
+  ipcMain.handle("downloads:cancel", (_event, id: string) => downloads!.cancel(id));
+  ipcMain.handle("downloads:remove-history", (_event, id: string) => downloads!.removeHistory(id));
+  ipcMain.handle("downloads:clear-history", () => downloads!.clearHistory());
+  ipcMain.handle("downloads:choose-dir", async (_event, defaultPath?: string) => {
+    const result = await dialog.showOpenDialog({
+      defaultPath: defaultPath || undefined,
+      properties: ["openDirectory", "createDirectory"]
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle("downloads:set-default-dir", (_event, dir: string) =>
+    backend.setDownloadDir(typeof dir === "string" ? dir : "")
+  );
+  ipcMain.handle("downloads:reveal", (_event, filePath: string) => {
+    if (typeof filePath !== "string" || !path.isAbsolute(filePath)) return false;
+    shell.showItemInFolder(filePath);
+    return true;
   });
   ipcMain.handle("attachments:choose-files", async (_event, payload?: { imagesOnly?: boolean }) => {
     const result = await dialog.showOpenDialog({
@@ -1435,6 +1480,11 @@ function stopActiveThreadsBeforeQuit(): Promise<void> {
       } catch (error) {
         console.error("[shutdown] Failed to interrupt active threads", error);
       } finally {
+        if (downloads) {
+          await downloads.shutdown().catch((error) => {
+            console.error("[shutdown] Failed to persist download tasks", error);
+          });
+        }
         await backend.flushRuntimeLogs().catch((error) => {
           console.error("[shutdown] Failed to flush runtime logs", error);
         });

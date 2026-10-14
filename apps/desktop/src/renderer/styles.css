@@ -31585,3 +31585,345 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   line-height: 1.5;
   background: rgba(255, 92, 92, 0.12);
 }
+
+/* ---------------------------------------------------------------------------
+   下载小工具：聊天区常驻面板，与随手记/接口卡片/查看文档同一接管模式。
+--------------------------------------------------------------------------- */
+.chat-canvas.is-downloads {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-canvas.is-downloads > .chat-scroll,
+.chat-canvas.is-downloads > footer {
+  display: none !important;
+}
+
+/* 接管聊天区时给一层毛玻璃表面：有壁纸时保证面板可读，无壁纸时与底色自然融合。 */
+.chat-canvas.is-downloads {
+  background: rgba(13, 14, 17, 0.74);
+  backdrop-filter: blur(18px);
+}
+
+/* 下载面板复用随手记的 quick-notes-inline 骨架，这里只做作用域补充，
+   与接口卡片的 api-favorites-inline 同一套法。 */
+.downloads-inline.project-sheet-header,
+.downloads-inline .project-sheet-header {
+  flex: 0 0 auto;
+  min-height: 48px;
+  align-items: center;
+  padding: 6px 14px 6px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.downloads-inline .quick-notes-header-title strong {
+  color: var(--text-soft);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/* 头部图标沿用接口卡片的蓝色系（quick-notes 默认是绿色系，这里覆盖）。 */
+.downloads-inline .quick-notes-header-icon {
+  border-color: rgba(100, 168, 255, 0.28);
+  background: rgba(100, 168, 255, 0.1);
+  color: #7fb6ff;
+}
+
+.downloads-inline .quick-notes-header-icon svg { width: 14px; height: 14px; }
+
+.downloads-inline .downloads-inline-body {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+
+/* 新建下载：输入框与主按钮同行，输入框对齐全局 36px 控件高度。 */
+.downloads-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.downloads-url-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text, #f1f3f6);
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.downloads-url-input:focus { border-color: rgba(121, 174, 248, 0.55); }
+
+.downloads-add-button {
+  flex: 0 0 auto;
+}
+
+.downloads-error {
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 92, 92, 0.4);
+  border-radius: 8px;
+  color: #ff8080;
+  background: rgba(255, 92, 92, 0.1);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 默认下载目录设置卡。 */
+.downloads-dir-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(145, 170, 205, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.downloads-dir-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(100, 168, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(100, 168, 255, 0.1);
+  color: #7fb6ff;
+}
+
+.downloads-dir-icon svg { width: 15px; height: 15px; }
+
+.downloads-dir-info {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.downloads-dir-label {
+  color: var(--text-soft, #aab2c0);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.downloads-dir-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted, #8f939d);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.downloads-dir-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 小工具内部的通用小按钮：横排、幽灵底，与全局 button.ghost 同族。 */
+.downloads-action-button {
+  padding: 4px 10px;
+  border: 1px solid rgba(145, 170, 205, 0.22);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft, #aab2c0);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.downloads-action-button:hover {
+  border-color: rgba(121, 174, 248, 0.5);
+  background: rgba(121, 174, 248, 0.1);
+  color: var(--text, #f1f3f6);
+}
+
+.downloads-action-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.downloads-action-button.is-accent {
+  border-color: rgba(121, 174, 248, 0.5);
+  color: #9cc1f9;
+}
+
+.downloads-action-button.is-danger:hover {
+  border-color: rgba(255, 128, 128, 0.55);
+  background: rgba(255, 128, 128, 0.1);
+  color: #ff8080;
+}
+
+.downloads-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.downloads-history-head {
+  margin-top: 8px;
+}
+
+.downloads-section-title {
+  color: var(--text-soft, #aab2c0);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.downloads-section-count {
+  color: var(--text-muted, #8f939d);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.downloads-section-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.downloads-list {
+  display: grid;
+  gap: 8px;
+}
+
+.downloads-empty {
+  padding: 14px;
+  border: 1px dashed rgba(145, 170, 205, 0.2);
+  border-radius: 10px;
+  color: var(--text-muted, #8f939d);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.downloads-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(145, 170, 205, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.downloads-item.is-completed { opacity: 0.92; }
+.downloads-item.is-failed .downloads-item-name,
+.downloads-item.is-canceled .downloads-item-name { color: var(--text-muted, #8f939d); }
+
+.downloads-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.downloads-item-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.downloads-item-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text, #f1f3f6);
+  font-size: 12.5px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.downloads-item-status {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--text-muted, #8f939d);
+  background: rgba(145, 170, 205, 0.12);
+}
+
+.downloads-item-status.is-downloading { color: #79aef8; background: rgba(121, 174, 248, 0.16); }
+.downloads-item-status.is-paused { color: #e0b45c; background: rgba(224, 180, 92, 0.14); }
+.downloads-item-status.is-completed { color: #6fd08f; background: rgba(111, 208, 143, 0.14); }
+.downloads-item-status.is-failed,
+.downloads-item-status.is-canceled { color: #ff8080; background: rgba(255, 128, 128, 0.12); }
+
+.downloads-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(145, 170, 205, 0.14);
+  overflow: hidden;
+}
+
+.downloads-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4c8bf5, #79aef8);
+  transition: width 0.35s ease;
+}
+
+.downloads-progress-fill[data-indeterminate="true"] {
+  width: 30% !important;
+  animation: downloads-indeterminate 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes downloads-indeterminate {
+  from { margin-left: 0; }
+  to { margin-left: 70%; }
+}
+
+.downloads-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--text-muted, #8f939d);
+  font-size: 11px;
+}
+
+.downloads-item-error {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: #ff8080;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 操作按钮横排贴右，与全局列表行（接口卡片等）的对齐方式一致。 */
+.downloads-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+:root[data-theme="light"] .chat-canvas.is-downloads {
+  background: rgba(247, 250, 253, 0.82);
+}
+
+:root[data-theme="light"] .downloads-url-input { background: #f1f6fb; }
+:root[data-theme="light"] .downloads-dir-card { border-color: #cfddea; background: #f6fafd; }
+:root[data-theme="light"] .downloads-item { border-color: #cfddea; background: #f6fafd; }
+:root[data-theme="light"] .downloads-empty { border-color: #b9cfe6; color: #6b7686; }
+:root[data-theme="light"] .downloads-item-status { background: #e6eef7; color: #6b7686; }
+:root[data-theme="light"] .downloads-item-status.is-downloading { background: #e2f1ff; color: #3d76d0; }
+:root[data-theme="light"] .downloads-item-status.is-paused { background: #fbf1da; color: #9c7a2e; }
+:root[data-theme="light"] .downloads-item-status.is-completed { background: #e3f5e9; color: #2f8f52; }
+:root[data-theme="light"] .downloads-item-status.is-failed,
+:root[data-theme="light"] .downloads-item-status.is-canceled { background: #fde8e8; color: #c04545; }
+:root[data-theme="light"] .downloads-progress { background: #dde7f2; }

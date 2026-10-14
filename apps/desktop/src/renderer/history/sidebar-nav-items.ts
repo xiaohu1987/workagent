@@ -11,7 +11,8 @@ export type SidebarNavSplit = {
 export const SIDEBAR_NAV_ITEM_LABELS: Record<SidebarNavItemId, string> = {
   quickNotes: "随手记",
   apiFavorites: "接口卡片",
-  documentViewer: "查看文档"
+  documentViewer: "查看文档",
+  downloads: "下载"
 };
 
 /**

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { SidebarNavItemId } from "@shared-types";
-import { IconApiCard, IconFile, IconNotebook } from "../icons";
+import { IconApiCard, IconDownload, IconFile, IconNotebook } from "../icons";
 import { SIDEBAR_NAV_ITEM_LABELS } from "./sidebar-nav-items";
 import "./sidebar-nav-more.css";
 
@@ -10,7 +10,8 @@ import "./sidebar-nav-more.css";
 export const SIDEBAR_NAV_ITEM_ICONS: Record<SidebarNavItemId, ReactNode> = {
   quickNotes: <IconNotebook />,
   apiFavorites: <IconApiCard />,
-  documentViewer: <IconFile />
+  documentViewer: <IconFile />,
+  downloads: <IconDownload />
 };
 
 type SidebarNavMoreProps = {

@@ -384,6 +384,21 @@ const api = {
     ipcRenderer.on("update:state", wrapped);
     return () => ipcRenderer.off("update:state", wrapped);
   },
+  getDownloadState: () => ipcRenderer.invoke("downloads:get-state"),
+  addDownload: (payload: { url: string; dir?: string }) => ipcRenderer.invoke("downloads:add", payload),
+  pauseDownload: (id: string) => ipcRenderer.invoke("downloads:pause", id),
+  resumeDownload: (id: string) => ipcRenderer.invoke("downloads:resume", id),
+  cancelDownload: (id: string) => ipcRenderer.invoke("downloads:cancel", id),
+  removeDownloadHistory: (id: string) => ipcRenderer.invoke("downloads:remove-history", id),
+  clearDownloadHistory: () => ipcRenderer.invoke("downloads:clear-history"),
+  chooseDownloadDir: (defaultPath?: string) => ipcRenderer.invoke("downloads:choose-dir", defaultPath),
+  setDefaultDownloadDir: (dir: string) => ipcRenderer.invoke("downloads:set-default-dir", dir),
+  revealDownload: (filePath: string) => ipcRenderer.invoke("downloads:reveal", filePath),
+  onDownloadState: (listener: (snapshot: unknown) => void) => {
+    const wrapped = (_event: unknown, snapshot: unknown) => listener(snapshot);
+    ipcRenderer.on("downloads:state", wrapped);
+    return () => ipcRenderer.off("downloads:state", wrapped);
+  },
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);

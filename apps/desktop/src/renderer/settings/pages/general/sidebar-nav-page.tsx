@@ -12,7 +12,8 @@ type Props = {
 const SIDEBAR_NAV_ITEM_DESCRIPTIONS: Record<SidebarNavItemId, string> = {
   quickNotes: "随手记下片段，稍后可整段移到聊天里。",
   apiFavorites: "打开收藏的接口卡片。",
-  documentViewer: "打开文档阅读视图。"
+  documentViewer: "打开文档阅读视图。",
+  downloads: "打开下载面板：分段并行、断点续传与历史记录。"
 };
 
 /**

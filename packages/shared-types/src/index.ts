@@ -1099,7 +1099,7 @@ export function resolveCompletionAuditModeSettings(
  * Sidebar rail entries the user can keep inline or tuck into the "更多" flyout.
  * The id order here is also the render order on the rail.
  */
-export const SIDEBAR_NAV_ITEM_IDS = ["quickNotes", "apiFavorites", "documentViewer"] as const;
+export const SIDEBAR_NAV_ITEM_IDS = ["quickNotes", "apiFavorites", "documentViewer", "downloads"] as const;
 
 export type SidebarNavItemId = (typeof SIDEBAR_NAV_ITEM_IDS)[number];
 
@@ -1116,6 +1116,54 @@ export function normalizeHiddenSidebarItems(value: unknown): SidebarNavItemId[] 
     if (matched) hidden.add(matched);
   }
   return SIDEBAR_NAV_ITEM_IDS.filter((id) => hidden.has(id));
+}
+
+/** One parallel byte range of a segmented download. */
+export interface DownloadSegment {
+  /** Absolute start offset in the target file. */
+  start: number;
+  /** Absolute end offset (inclusive). */
+  end: number;
+  /** Bytes of this segment already written to disk. */
+  downloaded: number;
+}
+
+export type DownloadTaskStatus = "probing" | "downloading" | "paused" | "completed" | "failed" | "canceled";
+
+export interface DownloadTask {
+  id: string;
+  url: string;
+  fileName: string;
+  /** Absolute path of the target file on disk. */
+  filePath: string;
+  kind: "http" | "p2p";
+  /** -1 while the total size is unknown. */
+  totalBytes: number;
+  receivedBytes: number;
+  /** Bytes per second over the last sampling window; 0 when idle. */
+  speedBps: number;
+  /** 0..1; -1 when the total size is unknown. */
+  progress: number;
+  status: DownloadTaskStatus;
+  segments: DownloadSegment[];
+  /** Whether the server accepted byte ranges (enables resume + segmentation). */
+  resumable: boolean;
+  /** Number of active pieces/peers for p2p tasks. */
+  peers?: number;
+  error?: string;
+  createdAt: string;
+  completedAt?: string;
+  etag?: string;
+  lastModified?: string;
+}
+
+export interface DownloadServiceSnapshot {
+  /** Active (downloading / paused / probing) tasks, newest first. */
+  tasks: DownloadTask[];
+  /** Finished (completed / failed / canceled) tasks, newest first. */
+  history: DownloadTask[];
+  defaultDir: string;
+  p2pAvailable: boolean;
 }
 
 export interface AppConfig {
@@ -1174,6 +1222,8 @@ export interface AppConfig {
      * empty keeps every entry inline, and the flyout is not rendered at all.
      */
     hiddenSidebarItems?: SidebarNavItemId[];
+    /** Default directory for the download gadget. Empty falls back to the system Downloads folder. */
+    downloadDir?: string;
   };
   multiAgent: MultiAgentSettings;
   selfImprovement: SelfImprovementSettings;

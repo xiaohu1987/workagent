@@ -333,7 +333,8 @@ export function defaultConfig(): AppConfig {
       sandboxMode: "read-only",
       sandboxNetworkAccess: false,
       screenshotShortcut: "CommandOrControl+Alt+S",
-      hiddenSidebarItems: []
+      hiddenSidebarItems: [],
+      downloadDir: ""
     },
     multiAgent: {
       defaultMode: "proactive",
@@ -550,7 +551,8 @@ export async function loadConfig(configFile: string): Promise<AppConfig> {
       screenshotShortcut: typeof parsed.desktop?.screenshotShortcut === "string"
         ? parsed.desktop.screenshotShortcut.trim().slice(0, 80)
         : "CommandOrControl+Alt+S",
-      hiddenSidebarItems: normalizeHiddenSidebarItems(parsed.desktop?.hiddenSidebarItems)
+      hiddenSidebarItems: normalizeHiddenSidebarItems(parsed.desktop?.hiddenSidebarItems),
+      downloadDir: typeof parsed.desktop?.downloadDir === "string" ? parsed.desktop.downloadDir.trim().slice(0, 500) : ""
     },
     multiAgent: normalizeMultiAgentSettings(parsed.multiAgent),
     selfImprovement: normalizeSelfImprovementSettings(parsed.selfImprovement),

@@ -94,6 +94,8 @@ type Props = {
   documentViewerActive?: boolean;
   /** 查看文档入口右侧的数量：面板背后已打开的文档数，0 时入口不显示徽标。 */
   documentViewerOpenCount?: number;
+  onOpenDownloads: () => void;
+  downloadsActive?: boolean;
   /** Rail entries the user tucked into the "更多" flyout; empty keeps them inline. */
   hiddenSidebarItems?: SidebarNavItemId[];
   onOpenSearch: () => void;
@@ -113,7 +115,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, onOpenDownloads, downloadsActive = false, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
@@ -466,12 +468,14 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
   const railItemHandlers: Record<SidebarNavItemId, () => void> = {
     quickNotes: () => void onOpenQuickNotes(),
     apiFavorites: onOpenApiFavorites,
-    documentViewer: onOpenDocumentViewer
+    documentViewer: onOpenDocumentViewer,
+    downloads: onOpenDownloads
   };
   const railItemActiveStates: Record<SidebarNavItemId, boolean> = {
     quickNotes: quickNotesActive,
     apiFavorites: apiFavoritesActive,
-    documentViewer: documentViewerActive
+    documentViewer: documentViewerActive,
+    downloads: downloadsActive
   };
   /**
    * 入口上的可选数量：目前只有「查看文档」带一个，表示切走任务后仍留在面板里的文档数。

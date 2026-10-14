@@ -2225,6 +2225,21 @@ export class DesktopBackend {
     return reasoningEffort;
   }
 
+  /** 下载小工具：更新默认下载目录（空字符串回退到系统下载目录）。 */
+  public async setDownloadDir(dir: string): Promise<string> {
+    const normalized = typeof dir === "string" ? dir.trim().slice(0, 500) : "";
+    const previous = this.#config.desktop.downloadDir;
+    this.#config.desktop.downloadDir = normalized;
+    try {
+      await saveConfig(this.#layout.configFile, this.#config);
+    } catch (error) {
+      this.#config.desktop.downloadDir = previous;
+      throw error;
+    }
+    await this.#logs.append("config.download_dir_updated", { downloadDir: normalized });
+    return normalized;
+  }
+
   public async setLiveEditPreviewEnabled(enabled: boolean): Promise<boolean> {
     const previous = this.#config.desktop.liveEditPreview;
     this.#config.desktop.liveEditPreview = enabled;
