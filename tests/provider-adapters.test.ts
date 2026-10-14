@@ -2539,8 +2539,9 @@ describe("OpenAiCompatibleProvider", () => {
 
     const systemContent = mocks.chatCreate.mock.calls.at(-1)?.[0].messages[0].content as string;
     expect(systemContent).toContain("[Chinese output compatibility]");
-    expect(systemContent).toContain("MUST be written in Simplified Chinese");
-    expect(systemContent).toContain("Think in Simplified Chinese, not in English");
+    expect(systemContent).toContain("latest user request is in Chinese");
+    expect(systemContent).toContain("MUST also be written directly in Simplified Chinese");
+    expect(systemContent).toContain("Think and write these surfaced thoughts in Simplified Chinese");
     expect(systemContent).toContain("reasoning_content");
     expect(systemContent).toContain("用简体中文思考");
   });
@@ -4397,7 +4398,8 @@ describe("native provider tool protocols", () => {
 
     const instructions = mocks.responsesCreate.mock.calls.at(-1)?.[0].instructions as string;
     expect(instructions).toContain("[Chinese output compatibility]");
-    expect(instructions).toContain("MUST be written in Simplified Chinese");
+    expect(instructions).toContain("latest user request is in Chinese");
+    expect(instructions).toContain("MUST also be written directly in Simplified Chinese");
     // GPT streams its chain-of-thought through the Responses reasoning summary,
     // so the reminder must name that channel explicitly instead of only
     // mentioning reasoning_content and <think> blocks.

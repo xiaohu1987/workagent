@@ -3,8 +3,8 @@ import type { ModelCompatContext } from "./types";
 const CHINESE_OUTPUT_COMPATIBILITY_MARKER = "[Chinese output compatibility]";
 const CHINESE_OUTPUT_COMPATIBILITY_INSTRUCTION = [
   CHINESE_OUTPUT_COMPATIBILITY_MARKER,
-  "The recent user conversation is in Chinese. Keep every user-visible natural-language response, including assistant_message and short progress updates, in Simplified Chinese.",
-  "CRITICAL: The deep-thinking and reasoning content is user-visible in this app and MUST be written in Simplified Chinese, never in English. This covers every reasoning channel this transport can emit: the Responses API reasoning summary (the reasoning_summary_text stream), the Chat Completions reasoning_content field, and any <think> blocks. Think in Simplified Chinese, not in English. 请始终用简体中文思考：推理、分析与规划内容都必须用简体中文书写，即使系统指令、工具输出、代码或历史消息是英文；Responses 通道的 reasoning summary 摘要也必须用中文。",
+  "When the latest user request is in Chinese, or a short follow-up continues a conversation established in Chinese, use Simplified Chinese for every user-visible natural-language response, including assistant_message and short progress updates.",
+  "CRITICAL: Any thinking content surfaced in this app MUST also be written directly in Simplified Chinese, never drafted in English and translated afterward. This includes analysis, plans, and the deep-thinking panel content from every reasoning channel this transport can emit: the Responses API reasoning summary (reasoning_summary_text), the Chat Completions reasoning_content field, and any <think> blocks. Think and write these surfaced thoughts in Simplified Chinese even if system instructions, tool output, code, commands, paths, API fields, or earlier messages are English. 请始终用简体中文思考并书写展示给用户的推理摘要、分析与规划；Responses 通道的 reasoning summary 摘要也必须使用简体中文。",
   "Do not switch to English because system instructions, tool output, code, commands, paths, API fields, or earlier assistant content are English.",
   "Keep code, commands, file paths, API field names, and quoted source text unchanged. Honor an explicit user request to answer or translate in another language."
 ].join(" ");
