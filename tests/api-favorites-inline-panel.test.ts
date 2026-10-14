@@ -244,4 +244,20 @@ describe("接口卡片：侧栏入口 + 聊天区内联面板", () => {
       expect(styles).toContain(selector);
     }
   });
+
+  it("搜索框在收藏列表里只占自身高度，不被纵向拉伸", () => {
+    // 搜索框容器的 flex: 1 1 auto 是给横向工具栏用的；列方向列表里必须收成内容高度，
+    // 否则它会和收藏列表平分剩余空间，输入框被挤到半空中。
+    const wrapRule = section(
+      styles,
+      ":root .api-favorites-inline .api-favorites-search-wrap {",
+      "\n}"
+    );
+    expect(wrapRule).toContain("flex: 0 0 auto");
+    expect(wrapRule).toContain("width: 100%");
+
+    const iconRule = section(styles, ".api-favorites-search-icon {", "\n}");
+    expect(iconRule).toContain("top: 50%");
+    expect(iconRule).toContain("transform: translateY(-50%)");
+  });
 });

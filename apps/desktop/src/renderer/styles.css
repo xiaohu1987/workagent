@@ -31101,9 +31101,11 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 .api-favorites-search-icon {
   position: absolute;
+  top: 50%;
   left: 11px;
   display: grid;
   place-items: center;
+  transform: translateY(-50%);
   color: var(--text-faint);
   pointer-events: none;
 }
@@ -31343,6 +31345,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
    历史覆盖，也不会波及随手记面板本身。
 --------------------------------------------------------------------------- */
 :root .api-favorites-inline .api-favorites-search-wrap {
+  flex: 0 0 auto;
+  width: 100%;
   margin-top: 12px;
 }
 
