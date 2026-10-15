@@ -10,6 +10,11 @@ log/
 # Runtime and generated task outputs are local artifacts, not source changes.
 /outputs/
 /graphify_run/
+# Local pnpm store written by test runs that pass --store-dir test-store.
+/test-store/
+
+# Incremental compiler caches produced by local type-check runs.
+*.tsbuildinfo
 
 # Editor, patch, and process leftovers.
 *.tmp
