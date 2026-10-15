@@ -1,5 +1,6 @@
-import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { shell } from "electron";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -24,6 +25,8 @@ const SEGMENT_MIN_SIZE = 8 * 1024 * 1024;
 const MAX_SEGMENTS = 8;
 const TICK_INTERVAL_MS = 500;
 const HISTORY_LIMIT = 200;
+/** 磁力解析（等元数据）超时：超时后给出可行动的失败原因，而不是永远停在「解析中」。 */
+const P2P_METADATA_TIMEOUT_MS = 180_000;
 const REDIRECT_LIMIT = 6;
 const USER_AGENT = "CodeXH-Downloader/1.0";
 
@@ -106,12 +109,24 @@ export class DownloadService {
   readonly #options: DownloadServiceOptions;
   readonly #tasks = new Map<string, RuntimeTask>();
   readonly #history = new Map<string, DownloadTask>();
-  readonly #torrents = new Map<string, { pause: () => void; resume: () => void; destroy: (options?: { destroyStore?: boolean }) => void }>();
+  readonly #torrents = new Map<string, {
+    pause: () => void;
+    resume: () => void;
+    destroy: (options?: { destroyStore?: boolean }) => void;
+    /** helper 进程每秒推送的最新实时状态（元数据未到时 hasMetadata 为 false）。 */
+    stats?: () => P2pTorrentStats | null;
+  }>();
   readonly #stateDir: string;
   readonly #historyFile: string;
   #tickTimer: NodeJS.Timeout | null = null;
-  #torrentEngine: TorrentEngine | null = null;
-  #torrentProbed = false;
+  /** P2P 引擎子进程（外部 Node 22 运行 webtorrent；Electron 43 内嵌 Node 24 的 DHT 不工作，见 memory/2026-10-14）。 */
+  #p2pProc: ReturnType<typeof spawn> | null = null;
+  #p2pReadyPromise: Promise<ReturnType<typeof spawn>> | null = null;
+  #p2pStdinBuffer = "";
+  readonly #torrentStatsCache = new Map<string, P2pTorrentStats>();
+  /** add 请求的握手等待方：收到该任务首条 stats 即视为引擎已受理（元数据解析不再阻塞 add）。 */
+  readonly #torrentHandshakeWaiters = new Map<string, () => void>();
+  #p2pInstalling = false;
   #started = false;
 
   public constructor(options: DownloadServiceOptions) {
@@ -136,7 +151,368 @@ export class DownloadService {
   }
 
   public isP2pAvailable(): boolean {
-    return this.#probeTorrentEngine() !== null;
+    return this.#torrentEntryPath() !== null;
+  }
+
+  public isP2pInstalling(): boolean {
+    return this.#p2pInstalling;
+  }
+
+  /** P2P 组件的隔离安装目录：userData 下，asar 安装版同样可写。 */
+  #vendorDir(): string {
+    return path.join(this.#options.dataDir, "p2p-vendor");
+  }
+
+  /** vendor 目录里 webtorrent 的 ESM 入口文件；没装或残缺返回 null。 */
+  #torrentEntryPath(): string | null {
+    const pkgPath = path.join(this.#vendorDir(), "node_modules", "webtorrent", "package.json");
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { main?: string; exports?: Record<string, unknown> };
+      const entry = this.#resolveEsmEntry(pkg) ?? "index.js";
+      const entryPath = path.join(this.#vendorDir(), "node_modules", "webtorrent", entry);
+      return fs.existsSync(entryPath) ? entryPath : null;
+    } catch {
+      return null;
+    }
+  }
+
+  #resolveEsmEntry(pkg: { main?: string; exports?: Record<string, unknown> }): string | null {
+    const dot = pkg.exports ? (pkg.exports as Record<string, unknown>)["."] : null;
+    if (typeof dot === "string") return dot;
+    if (dot && typeof dot === "object") {
+      const scoped = dot as Record<string, string | undefined>;
+      return scoped.import ?? scoped.default ?? scoped.node ?? null;
+    }
+    return pkg.main ?? null;
+  }
+
+  /** 机器上的独立 Node 22 运行时：P2P 引擎必须跑在它里面（Node 24 的 DHT 不工作）。 */
+  #findNodeExe(): string | null {
+    const candidates = [
+      "C:\\Program Files\\nodejs\\node.exe",
+      path.join(process.env.USERPROFILE ?? "", ".workbuddy", "binaries", "node", "versions", "22.22.2-6", "node.exe"),
+      path.join(path.dirname(process.execPath), "node.exe")
+    ];
+    for (const candidate of candidates) {
+      try { if (candidate && fs.existsSync(candidate)) return candidate; } catch { /* 忽略非法路径 */ }
+    }
+    return null;
+  }
+
+  /** helper 脚本落盘在 vendor 目录：与运行形态（源码/打包）无关的稳定路径。 */
+  #p2pHelperPath(): string {
+    return path.join(this.#vendorDir(), "p2p-helper.cjs");
+  }
+
+  #writeP2pHelper(): void {
+    const helperPath = this.#p2pHelperPath();
+    try {
+      if (fs.existsSync(helperPath) && fs.readFileSync(helperPath, "utf8") === P2P_HELPER_SOURCE) return;
+    } catch { /* 读不了就重写 */ }
+    fs.writeFileSync(helperPath, P2P_HELPER_SOURCE, "utf8");
+  }
+
+  /** 启动（或复用）P2P 引擎子进程，ready 后返回。进程崩溃后由 close 处理器重置状态。 */
+  async #ensureP2pProcess(): Promise<ReturnType<typeof spawn>> {
+    if (this.#p2pReadyPromise) return this.#p2pReadyPromise;
+    const entry = this.#torrentEntryPath();
+    if (!entry) {
+      throw new Error("P2P（BT/磁力）组件未安装，请点击上方「下载安装」按钮。");
+    }
+    const nodeExe = this.#findNodeExe();
+    if (!nodeExe) {
+      throw new Error("未找到独立的 Node.js 运行时，P2P 引擎无法启动（P2P 需要外部 Node 22，Electron 内置运行时的 DHT 不工作）。");
+    }
+    this.#writeP2pHelper();
+    this.#p2pReadyPromise = new Promise<ReturnType<typeof spawn>>((resolve, reject) => {
+      this.#options.log("download.p2p_helper_spawning", { nodeExe, vendor: this.#vendorDir() });
+      const proc = spawn(nodeExe, [this.#p2pHelperPath(), this.#vendorDir()], {
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      this.#p2pProc = proc;
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        fn();
+      };
+      proc.on("error", (error) => {
+        this.#p2pProc = null;
+        this.#p2pReadyPromise = null;
+        settle(() => reject(new Error(`P2P 引擎进程启动失败：${error.message}`)));
+      });
+      proc.stdout?.on("data", (chunk: Buffer) => this.#handleP2pStdout(chunk));
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString().trim();
+        if (text) this.#options.log("download.p2p_helper_stderr", { text: text.slice(0, 400) });
+      });
+      proc.on("close", (code) => {
+        this.#options.log("download.p2p_helper_exit", { code });
+        // 引擎死了：所有 P2P 任务失败，下次 add 时重新拉起。
+        this.#p2pProc = null;
+        this.#p2pReadyPromise = null;
+        this.#torrentStatsCache.clear();
+        for (const task of this.#tasks.values()) {
+          if (task.kind === "p2p") {
+            this.#failTask(task, new Error("P2P 引擎进程异常退出，请重新添加下载任务。"));
+          }
+        }
+        for (const waiter of this.#torrentHandshakeWaiters.values()) waiter();
+        this.#torrentHandshakeWaiters.clear();
+      });
+      // ready 消息到达时 resolve（#handleP2pStdout 内）。
+      this.#p2pResolveReady = () => settle(() => resolve(proc));
+      this.#p2pRejectReady = (message: string) => settle(() => reject(new Error(message)));
+    });
+    return this.#p2pReadyPromise;
+  }
+
+  #p2pResolveReady: (() => void) | null = null;
+  #p2pRejectReady: ((message: string) => void) | null = null;
+
+  #p2pSend(command: Record<string, unknown>): void {
+    try {
+      this.#p2pProc?.stdin?.write(`${JSON.stringify(command)}\n`);
+    } catch { /* 进程已死时由 close 处理 */ }
+  }
+
+  #handleP2pStdout(chunk: Buffer): void {
+    this.#p2pStdinBuffer = `${this.#p2pStdinBuffer}${chunk.toString()}`;
+    let newlineAt = this.#p2pStdinBuffer.indexOf("\n");
+    while (newlineAt >= 0) {
+      const line = this.#p2pStdinBuffer.slice(0, newlineAt).trim();
+      this.#p2pStdinBuffer = this.#p2pStdinBuffer.slice(newlineAt + 1);
+      if (line) this.#handleP2pMessage(line);
+      newlineAt = this.#p2pStdinBuffer.indexOf("\n");
+    }
+  }
+
+  /** 元数据落定：更新任务展示信息、从「解析中」转入「下载中」。 */
+  #resolveTorrentMetadata(id: string, name: string, length: number, torrentPath: string): void {
+    const task = this.#tasks.get(id);
+    if (!task) return;
+    if (name) task.fileName = name;
+    if (torrentPath) task.filePath = path.join(torrentPath, name);
+    if (length > 0) task.totalBytes = length;
+    if (task.status === "probing") task.status = "downloading";
+    this.#emit();
+  }
+
+  #handleP2pMessage(line: string): void {
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      this.#options.log("download.p2p_helper_raw", { text: line.slice(0, 200) });
+      return;
+    }
+    const id = typeof msg.id === "string" ? msg.id : "";
+    switch (msg.type) {
+      case "ready":
+        this.#options.log("download.p2p_helper_ready", { node: msg.node ?? "" });
+        this.#p2pResolveReady?.();
+        this.#p2pResolveReady = null;
+        this.#p2pRejectReady = null;
+        break;
+      case "fatal":
+        this.#options.log("download.p2p_helper_fatal", { message: String(msg.message ?? "") });
+        this.#p2pRejectReady?.(String(msg.message ?? "P2P 引擎启动失败。"));
+        this.#p2pResolveReady = null;
+        this.#p2pRejectReady = null;
+        break;
+      case "metadata": {
+        // webtorrent 的 add 回调时机不可靠（实测可能永远不触发），
+        // 元数据落定以 stats 推送为准；这条消息仅作兜底。
+        this.#resolveTorrentMetadata(id, typeof msg.name === "string" ? msg.name : "", typeof msg.length === "number" ? msg.length : -1, typeof msg.path === "string" ? msg.path : "");
+        break;
+      }
+      case "stats": {
+        const stats: P2pTorrentStats = {
+          peers: typeof msg.peers === "number" ? msg.peers : 0,
+          downloaded: typeof msg.downloaded === "number" ? msg.downloaded : 0,
+          progress: typeof msg.progress === "number" ? msg.progress : 0,
+          length: typeof msg.length === "number" ? msg.length : -1,
+          dhtNodes: typeof msg.dhtNodes === "number" ? msg.dhtNodes : 0,
+          hasMetadata: msg.hasMetadata === true,
+          name: typeof msg.name === "string" ? msg.name : ""
+        };
+        this.#torrentStatsCache.set(id, stats);
+        // 首条 stats = 引擎已受理该任务，唤醒 add 握手（元数据解析不再阻塞 add）。
+        const handshake = this.#torrentHandshakeWaiters.get(id);
+        if (handshake) {
+          this.#torrentHandshakeWaiters.delete(id);
+          handshake();
+        }
+        if (stats.hasMetadata) {
+          this.#resolveTorrentMetadata(id, stats.name, stats.length, "");
+        }
+        break;
+      }
+      case "done": {
+        const task = this.#tasks.get(id);
+        if (task) this.#finishTask(task);
+        break;
+      }
+      case "error": {
+        const task = this.#tasks.get(id);
+        if (task) this.#failTask(task, new Error(String(msg.message ?? "P2P 下载出错。")));
+        break;
+      }
+      case "closed":
+        this.#torrentStatsCache.delete(id);
+        break;
+      case "client-error":
+        this.#options.log("download.p2p_client_error", { message: String(msg.message ?? "") });
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * 应用内安装 P2P 组件：npm 装进 userData 下的隔离 vendor 目录（不碰项目
+   * node_modules / lockfile，pnpm 工作区也互不影响），然后单独补齐
+   * node-datachannel 的原生二进制。成功后由调用方重启应用加载。
+   */
+  public async installP2pDependency(onProgress: (line: string) => void): Promise<void> {
+    if (this.isP2pAvailable()) return;
+    if (this.#p2pInstalling) throw new Error("P2P 组件正在安装中，请稍候。");
+    this.#p2pInstalling = true;
+    this.#emit();
+    try {
+      await this.#runP2pInstall(onProgress);
+    } finally {
+      this.#p2pInstalling = false;
+      this.#emit();
+    }
+  }
+
+  async #runP2pInstall(onProgress: (line: string) => void): Promise<void> {
+    const vendor = this.#vendorDir();
+    await fsp.mkdir(vendor, { recursive: true });
+    const pkgPath = path.join(vendor, "package.json");
+    if (!fs.existsSync(pkgPath)) {
+      await fsp.writeFile(pkgPath, JSON.stringify({ name: "codexh-p2p-vendor", private: true }, null, 2), "utf8");
+    }
+    // 1) npm 静默脚本安装：node-datachannel 的 postinstall 要从 GitHub 拉
+    //    prebuild，网络不稳会让整个安装失败；装完在第 2 步单独补，可控可重试。
+    const command = `npm install webtorrent --ignore-scripts --no-audit --no-fund --loglevel=error --registry=https://registry.npmmirror.com --prefix "${vendor}"`;
+    onProgress(`执行：${command}`);
+    await this.#spawnWithWatchdog(command, { cwd: vendor }, onProgress);
+    // 2) 补 node-datachannel 原生二进制（走 GitHub 加速代理，直连兜底）。
+    await this.#ensureNodeDatachannelBinary(onProgress);
+    // 3) 验证入口文件完整。
+    if (!this.#torrentEntryPath()) {
+      throw new Error("安装命令已成功，但 P2P 引擎文件不完整，请重试安装。");
+    }
+    onProgress("P2P 组件安装完成，即将重启应用加载。");
+  }
+
+  /** 带看门狗的子进程执行：连续一段时间无输出视为假死，主动终止并报错。 */
+  async #spawnWithWatchdog(
+    command: string,
+    options: { cwd: string },
+    onProgress: (line: string) => void,
+    stallTimeoutMs = 180_000
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(command, {
+        ...options,
+        shell: true,
+        env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" }
+      });
+      let tail = "";
+      let lastActivityAt = Date.now();
+      let settled = false;
+      const watchdog = setInterval(() => {
+        if (settled) return;
+        if (Date.now() - lastActivityAt > stallTimeoutMs) {
+          settled = true;
+          clearInterval(watchdog);
+          try { child.kill(); } catch { /* 进程已退出则忽略 */ }
+          reject(new Error(`安装卡住已终止（连续 ${Math.round(stallTimeoutMs / 1000)} 秒无进展）。请检查网络或代理后重试。`));
+        }
+      }, 15_000);
+      const collect = (chunk: Buffer) => {
+        lastActivityAt = Date.now();
+        const text = chunk.toString();
+        tail = `${tail}${text}`.slice(-4000);
+        for (const line of text.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed) onProgress(trimmed);
+        }
+      };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      child.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(watchdog);
+        reject(new Error(`无法启动包管理器：${error.message}`));
+      });
+      child.on("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(watchdog);
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        const tailLines = tail.trim().split(/\r?\n/).slice(-3).join("  ");
+        reject(new Error(`安装失败（退出码 ${code}）：${tailLines || "未知错误"}`));
+      });
+    });
+  }
+
+  /** 补齐 node-datachannel 的 napi prebuild（npm 包不含二进制，GitHub 直连常不稳，走加速代理兜底）。 */
+  async #ensureNodeDatachannelBinary(onProgress: (line: string) => void): Promise<void> {
+    const ndcDir = path.join(this.#vendorDir(), "node_modules", "node-datachannel");
+    const binary = path.join(ndcDir, "build", "Release", "node_datachannel.node");
+    if (fs.existsSync(binary)) return;
+    let version = "";
+    try {
+      const pkg = JSON.parse(await fsp.readFile(path.join(ndcDir, "package.json"), "utf8")) as { version?: string };
+      version = pkg.version ?? "";
+    } catch { /* 目录不存在时由下方报错 */ }
+    if (!version) throw new Error("未找到 node-datachannel 组件，无法补齐原生二进制。");
+    const platform = process.platform;
+    const arch = process.arch === "ia32" ? "x86" : process.arch;
+    const asset = `node-datachannel-v${version}-napi-v8-${platform}-${arch}.tar.gz`;
+    const releaseBase = `https://github.com/murat-dogan/node-datachannel/releases/download/v${version}`;
+    const urls = [
+      `https://gh-proxy.com/${releaseBase}/${asset}`,
+      `${releaseBase}/${asset}`
+    ];
+    const tmpFile = path.join(this.#vendorDir(), asset);
+    let downloaded = false;
+    for (const url of urls) {
+      onProgress(`下载原生组件：${url}`);
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(180_000), redirect: "follow" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (buffer.length < 100_000) throw new Error("文件过小，疑似不完整");
+        await fsp.writeFile(tmpFile, buffer);
+        downloaded = true;
+        break;
+      } catch (error) {
+        onProgress(`下载失败（${error instanceof Error ? error.message : String(error)}），尝试下一个源…`);
+        await fsp.rm(tmpFile, { force: true });
+      }
+    }
+    if (!downloaded) throw new Error("原生组件下载失败：所有下载源均不可达，请检查网络后重试。");
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(`tar -xzf "${tmpFile}" -C "${ndcDir}"`, { shell: true });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) { resolve(); return; }
+        reject(new Error(`解压原生组件失败（退出码 ${code}）。`));
+      });
+    });
+    await fsp.rm(tmpFile, { force: true });
+    if (!fs.existsSync(binary)) throw new Error("原生组件解压完成，但二进制文件缺失。");
+    onProgress("原生组件就绪。");
   }
 
   public getSnapshot(): DownloadServiceSnapshot {
@@ -144,7 +520,8 @@ export class DownloadService {
       tasks: [...this.#tasks.values()].map((task) => this.#publicTask(task)),
       history: [...this.#history.values()].map((task) => this.#publicTask(task)),
       defaultDir: this.getDefaultDir(),
-      p2pAvailable: this.isP2pAvailable()
+      p2pAvailable: this.isP2pAvailable(),
+      p2pInstalling: this.#p2pInstalling
     };
   }
 
@@ -223,6 +600,40 @@ export class DownloadService {
     this.#emit();
   }
 
+  /**
+   * 删除下载记录/取消任务时可选地把文件移入回收站（多文件种子是整个目录）。
+   * 文件已不在磁盘按成功处理；返回错误信息，空串表示成功。
+   */
+  public async deleteFile(filePath: string): Promise<string> {
+    const trimmed = filePath.trim();
+    if (!trimmed) return "";
+    if (!path.isAbsolute(trimmed)) return "删除文件失败：路径无效。";
+    let stat: fs.Stats | null = null;
+    try {
+      stat = await fsp.stat(trimmed);
+    } catch {
+      return ""; // 文件已不在磁盘上，视为成功
+    }
+    if (stat.isDirectory()) {
+      // 防呆：不允许删掉下载目录本身或它的祖先目录（P2P 解析期 filePath 是下载目录）。
+      const defaultDir = this.getDefaultDir();
+      const normalized = trimmed.endsWith(path.sep) ? trimmed.slice(0, -1) : trimmed;
+      if (defaultDir) {
+        const normalizedDefault = defaultDir.endsWith(path.sep) ? defaultDir.slice(0, -1) : defaultDir;
+        if (normalizedDefault === normalized || normalizedDefault.startsWith(normalized + path.sep)) {
+          return "删除文件失败：不能删除下载目录本身。";
+        }
+      }
+    }
+    try {
+      await shell.trashItem(trimmed);
+      this.#options.log("download.file_trashed", { filePath: trimmed });
+      return "";
+    } catch (error) {
+      return `删除文件失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
   public async clearHistory(): Promise<void> {
     this.#history.clear();
     await this.#persistHistory();
@@ -251,6 +662,13 @@ export class DownloadService {
       }
       await this.#persistTask(task);
     }
+    // P2P 引擎子进程：随应用退出（helper 收到 stdin close 会自行清理退出）。
+    try {
+      this.#p2pProc?.stdin?.end();
+      this.#p2pProc?.kill();
+    } catch { /* 进程已退出则忽略 */ }
+    this.#p2pProc = null;
+    this.#p2pReadyPromise = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -461,25 +879,8 @@ export class DownloadService {
   // P2P engine (optional webtorrent dependency)
   // ---------------------------------------------------------------------------
 
-  #probeTorrentEngine(): TorrentEngine | null {
-    if (this.#torrentProbed) return this.#torrentEngine;
-    this.#torrentProbed = true;
-    try {
-      const require = createRequire(import.meta.url);
-      const mod = require("webtorrent") as { default?: TorrentEngineCtor } & TorrentEngineCtor;
-      const WebTorrent = (mod.default ?? mod) as TorrentEngineCtor;
-      this.#torrentEngine = new WebTorrent() as TorrentEngine;
-    } catch {
-      this.#torrentEngine = null;
-    }
-    return this.#torrentEngine;
-  }
-
   async #addTorrentTask(source: string, dirOverride?: string): Promise<DownloadTask> {
-    const engine = this.#probeTorrentEngine();
-    if (!engine) {
-      throw new Error("P2P（BT/磁力）支持需要 webtorrent 依赖：请在项目根目录执行 pnpm add webtorrent 后重启应用。");
-    }
+    const proc = await this.#ensureP2pProcess();
     const dir = dirOverride?.trim() || this.getDefaultDir() || this.#systemFallbackDir();
     await fsp.mkdir(dir, { recursive: true });
     const id = randomUUID();
@@ -506,32 +907,43 @@ export class DownloadService {
     this.#tasks.set(id, task);
     this.#emit();
 
-    await new Promise<void>((resolve) => {
-      engine.add(source, { path: dir }, (torrent: TorrentInstance) => {
-        const refresh = () => {
-          task.fileName = torrent.name || task.fileName;
-          task.filePath = path.join(torrent.path ?? dir, torrent.name ?? "");
-          task.totalBytes = torrent.length || -1;
-          task.receivedBytes = torrent.downloaded || 0;
-          task.progress = torrent.progress ?? 0;
-          task.peers = torrent.numPeers ?? 0;
-        };
-        refresh();
-        this.#torrents.set(id, {
-          pause: () => torrent.pause(),
-          resume: () => torrent.resume(),
-          destroy: (options) => torrent.destroy(options as never)
-        });
-        torrent.on("download", refresh);
-        torrent.on("upload", refresh);
-        torrent.on("done", () => {
-          refresh();
-          this.#finishTask(task);
-        });
-        torrent.on("error", (error: unknown) => this.#failTask(task, error));
-        resolve();
-      });
+    // webtorrent 对磁力会忽略 announce 选项（实测），直接往 URI 追加 tr= 参数。
+    let finalSource = source;
+    if (/^magnet:/i.test(source)) {
+      finalSource = source + EXTRA_ANNOUNCE.map((tracker) => `&tr=${encodeURIComponent(tracker)}`).join("");
+    }
+    this.#options.log("download.p2p_adding", { id, source: source.slice(0, 120), dir, magnet: /^magnet:/i.test(source) });
+
+    this.#torrents.set(id, {
+      pause: () => this.#p2pSend({ type: "pause", id }),
+      resume: () => this.#p2pSend({ type: "resume", id }),
+      destroy: (options) => this.#p2pSend({ type: "destroy", id, options }),
+      stats: () => this.#torrentStatsCache.get(id) ?? null
     });
+    try {
+      // 只等「引擎受理」握手（首条 stats），不等元数据：冷启动 DHT 要慢慢
+      // bootstrap，元数据可能要几十秒甚至更久，留给 probing 状态 + 180 秒
+      // 解析超时去处理，界面在解析期持续显示节点数。
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.#torrentHandshakeWaiters.delete(id);
+          reject(new Error("P2P 引擎进程未响应任务请求，请重试。"));
+        }, 15_000);
+        this.#torrentHandshakeWaiters.set(id, () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        void proc;
+        this.#p2pSend({ type: "add", id, source: finalSource, path: dir });
+      });
+    } catch (error) {
+      this.#torrents.delete(id);
+      this.#torrentStatsCache.delete(id);
+      this.#tasks.delete(id);
+      this.#p2pSend({ type: "destroy", id });
+      this.#emit();
+      throw error;
+    }
     this.#options.log("download.p2p_started", { id, source: source.slice(0, 120), dir });
     return this.#publicTask(task);
   }
@@ -579,6 +991,7 @@ export class DownloadService {
     const now = Date.now();
     let changed = false;
     for (const task of this.#tasks.values()) {
+      if (task.kind === "p2p" && this.#refreshP2pTask(task, now)) changed = true;
       if (task.status !== "downloading") continue;
       const deltaBytes = task.receivedBytes - task.lastTickBytes;
       const deltaMs = now - task.lastTickAt;
@@ -594,6 +1007,42 @@ export class DownloadService {
       changed = true;
     }
     if (changed) this.#emit();
+  }
+
+  /**
+   * P2P 任务每个 tick 从引擎拉实时状态：解析期让节点数动起来（否则界面永远假 0），
+   * 元数据到达后转入下载态；解析超时给出明确失败原因。返回是否有变化需要广播。
+   */
+  #refreshP2pTask(task: RuntimeTask, now: number): boolean {
+    let changed = false;
+    const entry = this.#torrents.get(task.id);
+    const stats = entry?.stats?.();
+    if (stats) {
+      if (stats.peers !== task.peers) { task.peers = stats.peers; changed = true; }
+      if (stats.dhtNodes !== task.dhtNodes) { task.dhtNodes = stats.dhtNodes; changed = true; }
+      if (stats.hasMetadata) {
+        if (stats.name && stats.name !== task.fileName) { task.fileName = stats.name; changed = true; }
+        if (stats.length !== task.totalBytes) { task.totalBytes = stats.length; changed = true; }
+        if (stats.downloaded !== task.receivedBytes) { task.receivedBytes = stats.downloaded; changed = true; }
+        if (stats.progress !== task.progress) { task.progress = stats.progress; changed = true; }
+      }
+    }
+    // 元数据已到（attach 回调里也会转一次，这里兜底解析期轮询路径）。
+    if (task.status === "probing" && stats?.hasMetadata) {
+      task.status = "downloading";
+      changed = true;
+    }
+    if (task.status !== "probing") return changed;
+    const startedAt = Date.parse(task.createdAt);
+    if (Number.isFinite(startedAt) && now - startedAt > P2P_METADATA_TIMEOUT_MS) {
+      this.#failTask(task, new Error(
+        "解析磁力元数据超时（已等待 3 分钟）：本机网络未能从 DHT 与 tracker 找到可连接的做种节点。"
+        + "可能是该种子已无活跃做种，或本机网络对 BT 流量受限。"
+        + "可换用做种较多的资源，或使用附带可用 tracker 的磁力链接后重试。"
+      ));
+      return true;
+    }
+    return changed;
   }
 
   #publicTask(task: RuntimeTask | DownloadTask): DownloadTask {
@@ -692,22 +1141,109 @@ export class DownloadService {
   }
 }
 
-// Minimal structural types so the optional webtorrent dependency stays untyped.
-type TorrentInstance = {
-  name?: string;
-  path?: string;
-  length?: number;
-  downloaded?: number;
-  progress?: number;
-  numPeers?: number;
-  pause: () => void;
-  resume: () => void;
-  destroy: (options?: object) => void;
-  on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+/**
+ * 追加到磁力任务的公开 tracker（webtorrent 对自带 tracker 的磁力不会补默认列表）。
+ * 全部走 WSS/TCP：UDP 受限的环境里这是 peer 发现的兜底通道。
+ */
+const EXTRA_ANNOUNCE = [
+  "wss://tracker.openwebtorrent.com",
+  "wss://tracker.btorrent.xyz",
+  "wss://tracker.fastcast.nz",
+  // 常规 BitTorrent 生态的开放 tracker：经典种子（影视/系统镜像）的节点
+  // 主要在 udp/http tracker 上，wss 生态里没有它们。
+  "udp://tracker.opentrackr.org:1337/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "udp://open.demonii.com:1337/announce",
+  "udp://explodie.org:6969/announce"
+];
+
+/** helper 进程推送的单任务实时状态。 */
+type P2pTorrentStats = {
+  peers: number;
+  downloaded: number;
+  progress: number;
+  length: number;
+  /** 引擎 DHT 路由表规模：解析期给用户「引擎活着、正在找节点」的可见反馈。 */
+  dhtNodes: number;
+  hasMetadata: boolean;
+  name: string;
 };
 
-type TorrentEngine = {
-  add: (source: string, options: { path: string }, onTorrent: (torrent: TorrentInstance) => void) => unknown;
-};
-
-type TorrentEngineCtor = new () => TorrentEngine;
+/**
+ * P2P 引擎 helper：由主进程写到 vendor 目录，用外部 Node 22 运行。
+ * 必须独立进程的原因：webtorrent 的 DHT 在 Electron 43（Node 24）主进程里
+ * 收不到任何节点/peer（listening 正常），Node 22 一切正常——实测见
+ * memory/2026-10-14「解析中卡死」一节。协议：stdin/stdout 每行一个 JSON。
+ */
+const P2P_HELPER_SOURCE = String.raw`"use strict";
+const path = require("node:path");
+const readline = require("node:readline");
+const { pathToFileURL } = require("node:url");
+const vendorDir = process.argv[2] || "";
+function send(msg) { try { process.stdout.write(JSON.stringify(msg) + "\n"); } catch (e) { /* pipe gone */ } }
+(async () => {
+  try {
+    const pkgPath = path.join(vendorDir, "node_modules", "webtorrent", "package.json");
+    const pkg = require(pkgPath);
+    const dot = pkg.exports && pkg.exports["."];
+    const entry = typeof dot === "string" ? dot : (dot && (dot.import || dot.default || dot.node)) || pkg.main || "index.js";
+    const mod = await import(pathToFileURL(path.join(vendorDir, "node_modules", "webtorrent", entry)).href);
+    const WebTorrent = mod.default || mod;
+    const client = new WebTorrent();
+    client.on("error", (e) => send({ type: "client-error", message: String((e && e.message) || e) }));
+    send({ type: "ready", node: process.version });
+    const torrents = new Map();
+    const rl = readline.createInterface({ input: process.stdin, terminal: false });
+    rl.on("line", (line) => {
+      let cmd = null;
+      try { cmd = JSON.parse(line); } catch (e) { return; }
+      if (!cmd || !cmd.type) return;
+      const existing = cmd.id ? torrents.get(cmd.id) : null;
+      if (cmd.type === "add") {
+        try {
+          const opts = { path: cmd.path };
+          if (cmd.announce) opts.announce = cmd.announce;
+          const torrent = client.add(cmd.source, opts, (tor) => {
+            send({ type: "metadata", id: cmd.id, name: tor.name || "", length: tor.length || -1, path: tor.path || cmd.path });
+          });
+          torrents.set(cmd.id, torrent);
+          torrent.on("error", (e) => send({ type: "error", id: cmd.id, message: String((e && e.message) || e) }));
+          torrent.on("done", () => send({ type: "done", id: cmd.id }));
+          const timer = setInterval(() => {
+            try {
+              let dhtNodes = 0;
+              try {
+                const nodes = torrent.client && torrent.client.dht && torrent.client.dht.nodes;
+                dhtNodes = nodes ? (typeof nodes.count === "function" ? nodes.count() : (nodes.length || 0)) : 0;
+              } catch (e2) { dhtNodes = 0; }
+              send({
+                type: "stats", id: cmd.id,
+                peers: torrent.numPeers || 0,
+                downloaded: torrent.downloaded || 0,
+                progress: torrent.progress || 0,
+                length: torrent.length || -1,
+                hasMetadata: !!torrent.name,
+                name: torrent.name || "",
+                dhtNodes: dhtNodes
+              });
+            } catch (e3) { clearInterval(timer); }
+          }, 1000);
+          torrent.once("close", () => { clearInterval(timer); torrents.delete(cmd.id); send({ type: "closed", id: cmd.id }); });
+        } catch (e) { send({ type: "error", id: cmd.id, message: String((e && e.message) || e) }); }
+        return;
+      }
+      if (!existing) return;
+      if (cmd.type === "pause") existing.pause();
+      else if (cmd.type === "resume") existing.resume();
+      else if (cmd.type === "destroy") existing.destroy(cmd.options || {});
+    });
+    process.stdin.on("close", () => {
+      try { client.destroy(() => process.exit(0)); } catch (e) { process.exit(0); }
+      setTimeout(() => process.exit(0), 3000);
+    });
+  } catch (e) {
+    send({ type: "fatal", message: String((e && e.message) || e) });
+    process.exit(1);
+  }
+})();
+`;

@@ -361,10 +361,13 @@ declare global {
       resumeDownload: (id: string) => Promise<boolean>;
       cancelDownload: (id: string) => Promise<void>;
       removeDownloadHistory: (id: string) => Promise<void>;
+      deleteDownloadFile: (filePath: string) => Promise<string>;
       clearDownloadHistory: () => Promise<void>;
       chooseDownloadDir: (defaultPath?: string) => Promise<string | null>;
       setDefaultDownloadDir: (dir: string) => Promise<string>;
       revealDownload: (filePath: string) => Promise<boolean>;
+      installP2pDependency: () => Promise<boolean>;
+      onP2pInstallProgress: (listener: (line: string) => void) => () => void;
       onDownloadState: (listener: (snapshot: RendererDownloadSnapshot) => void) => () => void;
       importKnowledge: (payload: {
         displayName: string;

@@ -63,6 +63,12 @@ export type GptReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export const GPT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const satisfies readonly GptReasoningEffort[];
 export const DEEPSEEK_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly GptReasoningEffort[];
+/** GLM-5.2：全档可用（服务端自行映射 low/medium→high、xhigh→max、none/minimal→放弃思考）。 */
+export const GLM_5_2_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly GptReasoningEffort[];
+/** GLM-5.3 / GLM-5.3-FLASH：官方仅接受 low/high/max，其它档位直接报错。 */
+export const GLM_5_3_REASONING_EFFORTS = ["low", "high", "max"] as const satisfies readonly GptReasoningEffort[];
+/** Grok：官方仅 low/high 两档，且仅 grok-3-mini(-fast) 支持。 */
+export const GROK_REASONING_EFFORTS = ["low", "high"] as const satisfies readonly GptReasoningEffort[];
 
 export function isGptReasoningEffort(value: unknown): value is GptReasoningEffort {
   return typeof value === "string" && (
@@ -965,30 +971,95 @@ export function isConfigurableGptReasoningModel(
   return major > 5 || (major === 5 && minor >= 1);
 }
 
+function modelIdentityText(model: Pick<ModelProfile, "id" | "displayName">): string {
+  return `${model.id} ${model.displayName ?? ""}`.toLowerCase();
+}
+
+/** GLM 版本号：glm-5.3-flash → {major:5, minor:3}；非 GLM 返回 null。 */
+function glmVersionOf(identity: string): { major: number; minor: number } | null {
+  const match = /\bglm-(\d+)(?:\.(\d+))?/.exec(identity);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: match[2] === undefined ? 0 : Number(match[2]) };
+}
+
+/**
+ * 是否支持「推理强度」选择（决定 UI 是否显示选择器，以及请求是否携带参数）。
+ * 依据各官方文档（2026-10 核对）：
+ *  - OpenAI：GPT-5.1+ 与 o 系列支持 reasoning_effort；gpt-5-pro 仅 high；xhigh 仅
+ *    gpt-5.1-codex-max 及之后；gpt-5.0 及更早不支持 none。
+ *  - GLM：reasoning_effort 仅 GLM-5.2 及以上（GLM-5.3/5.3-FLASH 仅 low/high/max，
+ *    且 thinking 不可关闭）；GLM-5.1 及以下只有 thinking.type 开关。
+ *  - DeepSeek：现行在售型号全部是 V4 系（deepseek-chat/reasoner 是 v4-flash 的
+ *    模式别名，2026-07 弃用），官方 chat 协议统一支持 thinking + reasoning_effort。
+ *    适配层同样对所有 DeepSeek thinking 模型发送，因此凡标记 role=reasoning 的
+ *    DeepSeek 模型一律视为支持（自定义 ID 不带 v4 字样也不会误伤）。
+ *  - Grok：reasoning_effort 仅 low/high，且仅 grok-3-mini(-fast) 支持；grok-4+ 传了报错。
+ *  - Qwen / Kimi / Claude / Gemini：无等效 effort 入参或走专用适配层，不显示。
+ */
 export function isConfigurableReasoningEffortModel(
   model: Pick<ModelProfile, "id" | "displayName" | "role">
 ): boolean {
   if (isConfigurableGptReasoningModel(model)) return true;
   if (model.role !== "reasoning") return false;
-  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
-  return /\bdeepseek\b/.test(identity)
-    || /\b(?:glm|chatglm)\b/.test(identity)
-    || /\bgrok\b/.test(identity);
+  const identity = modelIdentityText(model);
+  const glm = glmVersionOf(identity);
+  if (glm && (glm.major > 5 || (glm.major === 5 && glm.minor >= 2))) return true;
+  if (/\bdeepseek\b/.test(identity)) return true;
+  if (/\bgrok-3-mini\b/.test(identity)) return true;
+  return false;
+}
+
+/** GPT 家族按具体型号裁剪档位（官方文档核对）。 */
+function gptReasoningEffortsFor(identity: string): readonly GptReasoningEffort[] {
+  if (/\bgpt-5-pro\b/.test(identity)) return ["high"];
+  if (/(?:^|[^a-z0-9])o[134](?:$|[^a-z0-9]|\d)/.test(identity)) return ["low", "medium", "high"];
+  const version = /\bgpt-(\d+)(?:\.(\d+))?/i.exec(identity);
+  if (version) {
+    const major = Number(version[1]);
+    const minor = version[2] === undefined ? 0 : Number(version[2]);
+    if (major > 5) return GPT_REASONING_EFFORTS;
+    if (major === 5 && minor >= 1) {
+      // xhigh 自 gpt-5.1-codex-max 起支持（官方：xhigh is supported for all
+      // models after gpt-5.1-codex-max），后续型号（5.4+）同样可用。
+      return (minor >= 4 || /\bcodex-max\b/.test(identity))
+        ? GPT_REASONING_EFFORTS
+        : ["low", "medium", "high"];
+    }
+  }
+  return ["low", "medium", "high"];
 }
 
 export function withGptReasoningCapabilities<T extends ModelProfile>(model: T): T {
   if (!isConfigurableReasoningEffortModel(model)) return model;
-  const identity = `${model.id} ${model.displayName ?? ""}`.toLowerCase();
-  const isDeepSeek = /\bdeepseek\b/.test(identity);
-  const supportedReasoningEfforts: readonly GptReasoningEffort[] = isDeepSeek
-    ? DEEPSEEK_REASONING_EFFORTS
-    : GPT_REASONING_EFFORTS;
+  const identity = modelIdentityText(model);
+  const glm = glmVersionOf(identity);
+  let supportedReasoningEfforts: readonly GptReasoningEffort[];
+  let fallbackEffort: GptReasoningEffort;
+  if (glm && glm.major === 5 && glm.minor >= 3) {
+    supportedReasoningEfforts = GLM_5_3_REASONING_EFFORTS;
+    fallbackEffort = "high";
+  } else if (glm) {
+    supportedReasoningEfforts = GLM_5_2_REASONING_EFFORTS;
+    fallbackEffort = "high";
+  } else if (/\bdeepseek\b/.test(identity)) {
+    supportedReasoningEfforts = DEEPSEEK_REASONING_EFFORTS;
+    fallbackEffort = "high";
+  } else if (/\bgrok-3-mini\b/.test(identity)) {
+    supportedReasoningEfforts = GROK_REASONING_EFFORTS;
+    fallbackEffort = "high";
+  } else {
+    supportedReasoningEfforts = gptReasoningEffortsFor(identity);
+    fallbackEffort = "medium";
+  }
   return {
     ...model,
     supportedReasoningEfforts: [...supportedReasoningEfforts],
     defaultReasoningEffort: supportedReasoningEfforts.includes(model.defaultReasoningEffort as GptReasoningEffort)
       ? model.defaultReasoningEffort
-      : isDeepSeek ? "high" : "medium"
+      : supportedReasoningEfforts.includes(fallbackEffort)
+        ? fallbackEffort
+        // 兜底档必须落在支持列表内（如 gpt-5-pro 仅支持 high）。
+        : supportedReasoningEfforts[Math.max(0, Math.floor((supportedReasoningEfforts.length - 1) / 2))]
   };
 }
 
@@ -1150,6 +1221,8 @@ export interface DownloadTask {
   resumable: boolean;
   /** Number of active pieces/peers for p2p tasks. */
   peers?: number;
+  /** DHT routing-table size for p2p tasks; visible during magnet probing. */
+  dhtNodes?: number;
   error?: string;
   createdAt: string;
   completedAt?: string;
@@ -1164,6 +1237,8 @@ export interface DownloadServiceSnapshot {
   history: DownloadTask[];
   defaultDir: string;
   p2pAvailable: boolean;
+  /** webtorrent 应用内安装进行中。放在快照里，面板关闭再打开也能恢复安装态。 */
+  p2pInstalling?: boolean;
 }
 
 export interface AppConfig {

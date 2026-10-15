@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { defaultOpenAiApiFormatsForModel, finalizeTokenUsage, isGptFamilyModel, modelJsonCandidates, tryParseModelJson } from "@shared-types";
+import { defaultOpenAiApiFormatsForModel, finalizeTokenUsage, isConfigurableGptReasoningModel, isGptFamilyModel, modelJsonCandidates, tryParseModelJson } from "@shared-types";
 import type {
   OpenAiApiFormat,
   MessageAttachment,
@@ -1340,7 +1340,13 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           strict: false
         }))
       : undefined;
-    const requestedReasoningEffort = input.reasoningEffort ?? input.model.defaultReasoningEffort;
+    // Responses 协议的 reasoning.effort 是 OpenAI 定义：仅 GPT-5.1+/o 系列支持。
+    // 其它家族（GLM/DeepSeek/Grok 等）经兼容网关走 Responses 时不得携带，
+    // 否则不支持该入参的模型会直接 400（与 chat 路径的 per-family 门控一致）。
+    const responsesSupportsReasoningEffort = isConfigurableGptReasoningModel(input.model);
+    const requestedReasoningEffort = responsesSupportsReasoningEffort
+      ? input.reasoningEffort ?? input.model.defaultReasoningEffort
+      : undefined;
     // OpenAI Responses does not define the DeepSeek-only `max` value.
     const responsesReasoningEffort = isGptFamilyModel(input.model) && requestedReasoningEffort === "max"
       ? "xhigh"
@@ -1354,7 +1360,11 @@ class OpenAiResponsesProvider implements ProviderAdapter {
           Boolean(message.toolCalls?.length) &&
           !message.responseReasoningItem
       );
-    const reasoningEffort = hasIncompleteReasoningHistory ? "none" : responsesReasoningEffort;
+    const reasoningEffort = !responsesSupportsReasoningEffort
+      ? undefined
+      : hasIncompleteReasoningHistory
+        ? "none"
+        : responsesReasoningEffort;
     const baseRequest: Record<string, unknown> = {
       model: input.model.id,
       instructions: input.systemPrompt || undefined,

@@ -31638,6 +31638,8 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   gap: 12px;
   padding: 18px 22px;
   overflow-y: auto;
+  /* 错误文案换行后不允许把面板撑出横向滚动条。 */
+  overflow-x: hidden;
 }
 
 /* 新建下载：输入框与主按钮同行，输入框对齐全局 36px 控件高度。 */
@@ -31730,6 +31732,68 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+}
+
+/* P2P 组件安装栏：未装 webtorrent 时显示，一键应用内安装并自动重启。 */
+.downloads-p2p-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(224, 180, 92, 0.32);
+  border-radius: 10px;
+  background: rgba(224, 180, 92, 0.08);
+}
+
+.downloads-p2p-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.downloads-p2p-row .downloads-p2p-info {
+  flex: 1 1 auto;
+}
+
+/* 安装进度条复用下载任务的进度样式，宽度由解析到的百分比驱动。 */
+.downloads-p2p-progress {
+  height: 4px;
+}
+
+.downloads-p2p-info {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.downloads-p2p-label {
+  color: var(--text-soft, #aab2c0);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.downloads-p2p-desc {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted, #8f939d);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.downloads-p2p-log {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(224, 180, 92, 0.85);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 小工具内部的通用小按钮：横排、幽灵底，与全局 button.ghost 同族。 */
@@ -31898,10 +31962,28 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 .downloads-item-error {
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
   color: #ff8080;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 长错误文案直接换行展示，撑宽行会带出横向滚动条。 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.55;
+}
+
+/* 删除确认条里的「连文件一起删除」勾选项。 */
+.downloads-confirm-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--text, #f1f3f6);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.downloads-confirm-file input {
+  accent-color: var(--accent, #4c8bf5);
 }
 
 /* 操作按钮横排贴右，与全局列表行（接口卡片等）的对齐方式一致。 */
@@ -31918,6 +32000,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 :root[data-theme="light"] .downloads-url-input { background: #f1f6fb; }
 :root[data-theme="light"] .downloads-dir-card { border-color: #cfddea; background: #f6fafd; }
+:root[data-theme="light"] .downloads-p2p-bar { border-color: #e4d2a4; background: #fdf7e8; }
 :root[data-theme="light"] .downloads-item { border-color: #cfddea; background: #f6fafd; }
 :root[data-theme="light"] .downloads-empty { border-color: #b9cfe6; color: #6b7686; }
 :root[data-theme="light"] .downloads-item-status { background: #e6eef7; color: #6b7686; }

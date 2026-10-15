@@ -408,17 +408,36 @@ describe("model configuration storage", () => {
     expect(isConfigurableGptReasoningModel({ ...base, id: "claude-opus-4-5" })).toBe(false);
     expect(isConfigurableGptReasoningModel({ ...base, role: "image" })).toBe(false);
     expect(resolveModelReasoningEffort({ ...base, id: "claude-opus-4-5", defaultReasoningEffort: "high" }, "low")).toBe("high");
+    // DeepSeek：现行在售型号全是 V4 系，凡 role=reasoning 的 DeepSeek 模型都支持
+    // effort（自定义 ID 不带 v4 字样也不误伤）。
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "deepseek-v4-flash" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "deepseek-reasoner" })).toBe(true);
     expect(isConfigurableReasoningEffortModel({ ...base, id: "deepseek-flash" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "deepseek-chat" })).toBe(true);
+    // GLM：reasoning_effort 仅 5.2+；GLM-5.3/5.3-FLASH 仅 low/high/max；5.1 及以下无 effort 入参。
     expect(isConfigurableReasoningEffortModel({ ...base, id: "glm-5.3-flash" })).toBe(true);
-    expect(isConfigurableReasoningEffortModel({ ...base, id: "grok-4.5" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "glm-5.2" })).toBe(true);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "glm-5.1" })).toBe(false);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "glm-4.6" })).toBe(false);
+    // Grok：reasoning_effort 仅 grok-3-mini(-fast) 支持（low/high）；grok-4+ 传了报错。
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "grok-4.5" })).toBe(false);
+    expect(isConfigurableReasoningEffortModel({ ...base, id: "grok-3-mini" })).toBe(true);
     expect(isConfigurableReasoningEffortModel({ ...base, id: "claude-opus-4-5" })).toBe(false);
-    const deepseek = withGptReasoningCapabilities({ ...base, id: "deepseek-flash" });
+    const deepseek = withGptReasoningCapabilities({ ...base, id: "deepseek-v4-flash" });
     expect(deepseek.supportedReasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
     expect(deepseek.defaultReasoningEffort).toBe("high");
     expect(resolveModelReasoningEffort(deepseek, "max")).toBe("max");
-    expect(withGptReasoningCapabilities({ ...base, id: "glm-5.3-flash" }).supportedReasoningEfforts).toEqual([
-      "low", "medium", "high", "xhigh"
-    ]);
+    const glm53 = withGptReasoningCapabilities({ ...base, id: "glm-5.3-flash" });
+    expect(glm53.supportedReasoningEfforts).toEqual(["low", "high", "max"]);
+    expect(glm53.defaultReasoningEffort).toBe("high");
+    // 全局 medium 不在 GLM-5.3 档位中 → 回退到 high（官方映射一致）。
+    expect(resolveModelReasoningEffort(glm53, "medium")).toBe("high");
+    expect(resolveModelReasoningEffort(glm53, "max")).toBe("max");
+    // GPT-5.1（非 codex-max）不支持 xhigh；grok-3-mini 仅 low/high。
+    expect(withGptReasoningCapabilities({ ...base, id: "gpt-5.1" }).supportedReasoningEfforts).toEqual(["low", "medium", "high"]);
+    const grok3mini = withGptReasoningCapabilities({ ...base, id: "grok-3-mini" });
+    expect(grok3mini.supportedReasoningEfforts).toEqual(["low", "high"]);
+    expect(resolveModelReasoningEffort(grok3mini, "medium")).toBe("high");
   });
 
   it("migrates legacy response tones to a supported option", () => {

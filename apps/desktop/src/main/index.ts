@@ -840,6 +840,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("downloads:cancel", (_event, id: string) => downloads!.cancel(id));
   ipcMain.handle("downloads:remove-history", (_event, id: string) => downloads!.removeHistory(id));
+  ipcMain.handle("downloads:delete-file", (_event, filePath: string) => downloads!.deleteFile(filePath));
   ipcMain.handle("downloads:clear-history", () => downloads!.clearHistory());
   ipcMain.handle("downloads:choose-dir", async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
@@ -854,6 +855,17 @@ function registerIpc(): void {
   ipcMain.handle("downloads:reveal", (_event, filePath: string) => {
     if (typeof filePath !== "string" || !path.isAbsolute(filePath)) return false;
     shell.showItemInFolder(filePath);
+    return true;
+  });
+  // P2P 组件应用内安装：跑包管理器装 webtorrent，输出实时推给渲染层，成功后重启应用加载。
+  // 并发防抖与「安装中」状态都在 DownloadService 内部（随快照广播，面板切换不丢）。
+  ipcMain.handle("downloads:install-p2p", async () => {
+    if (!downloads) throw new Error("下载服务尚未就绪，请稍后重试。");
+    await downloads.installP2pDependency((line) => {
+      mainWindow?.webContents.send("downloads:install-progress", line);
+    });
+    app.relaunch();
+    quitApplication();
     return true;
   });
   ipcMain.handle("attachments:choose-files", async (_event, payload?: { imagesOnly?: boolean }) => {

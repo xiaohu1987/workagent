@@ -390,10 +390,17 @@ const api = {
   resumeDownload: (id: string) => ipcRenderer.invoke("downloads:resume", id),
   cancelDownload: (id: string) => ipcRenderer.invoke("downloads:cancel", id),
   removeDownloadHistory: (id: string) => ipcRenderer.invoke("downloads:remove-history", id),
+  deleteDownloadFile: (filePath: string) => ipcRenderer.invoke("downloads:delete-file", filePath),
   clearDownloadHistory: () => ipcRenderer.invoke("downloads:clear-history"),
   chooseDownloadDir: (defaultPath?: string) => ipcRenderer.invoke("downloads:choose-dir", defaultPath),
   setDefaultDownloadDir: (dir: string) => ipcRenderer.invoke("downloads:set-default-dir", dir),
   revealDownload: (filePath: string) => ipcRenderer.invoke("downloads:reveal", filePath),
+  installP2pDependency: () => ipcRenderer.invoke("downloads:install-p2p"),
+  onP2pInstallProgress: (listener: (line: string) => void) => {
+    const wrapped = (_event: unknown, line: string) => listener(line);
+    ipcRenderer.on("downloads:install-progress", wrapped);
+    return () => ipcRenderer.off("downloads:install-progress", wrapped);
+  },
   onDownloadState: (listener: (snapshot: unknown) => void) => {
     const wrapped = (_event: unknown, snapshot: unknown) => listener(snapshot);
     ipcRenderer.on("downloads:state", wrapped);

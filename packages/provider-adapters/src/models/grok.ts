@@ -1,4 +1,3 @@
-import { isGptReasoningEffort } from "@shared-types";
 import { defineCompat } from "./types";
 import type { ImageGenerationPlan, ModelCompatContext, ModelCompatToolCallMode, ModelGenerationContext } from "./types";
 import type { ModelProfile, ProviderTurnDecision, ProviderTurnInput, RuntimeToolCall, ToolSpecDefinition } from "@shared-types";
@@ -262,11 +261,17 @@ export const grokCompat = defineCompat(gptCompat, {
   normalizeRequestParams(context: ModelCompatContext, base: Record<string, unknown>): Record<string, unknown> {
     const request = gptCompat.normalizeRequestParams(context, base);
     if (!isGrokCompletionAudit(context)) {
+      // 官方文档（docs.x.ai/docs/guides/reasoning）：reasoning_effort 仅 low/high
+      // 两档，且仅 grok-3-mini / grok-3-mini-fast 支持；grok-4+ 传入会直接报错。
+      const identity = `${context.model.id} ${context.model.displayName ?? ""}`.toLowerCase();
+      if (!/\bgrok-3-mini\b/.test(identity)) return request;
       const effort = context.input.reasoningEffort;
-      const mappedEffort = effort === "xhigh" ? "high" : effort;
-      return isGptReasoningEffort(mappedEffort)
-        ? { ...request, reasoning_effort: mappedEffort }
-        : request;
+      if (effort === undefined) return request;
+      // low/minimal → low；medium/high/xhigh/max → high（grok-3-mini 只有这两档）。
+      const mappedEffort = effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max"
+        ? "high"
+        : "low";
+      return { ...request, reasoning_effort: mappedEffort };
     }
 
     const { response_format: _responseFormat, ...withoutJsonFormat } = request;

@@ -2494,17 +2494,27 @@ describe("OpenAiCompatibleProvider", () => {
       type: "openai-compatible",
       apiKey: "secret"
     });
+    // GLM-5.3-FLASH 官方仅接受 low/high/max；xhigh 按官方映射收敛为 max。
     expect(glm).toMatchObject({
       thinking: { type: "enabled" },
-      reasoning_effort: "high"
+      reasoning_effort: "max"
     });
 
-    const grok = await run("grok-4.5", "Grok 4.5", {
+    // grok-4+ 不支持 reasoning_effort（传了会报错），不得携带该参数。
+    const grok4 = await run("grok-4.5", "Grok 4.5", {
       id: "grok-gateway",
       type: "openai-compatible",
       apiKey: "secret"
     });
-    expect(grok).toMatchObject({ reasoning_effort: "high" });
+    expect(grok4).not.toHaveProperty("reasoning_effort");
+
+    // grok-3-mini 支持 low/high；xhigh 映射为 high。
+    const grok3mini = await run("grok-3-mini", "Grok 3 Mini", {
+      id: "grok-gateway",
+      type: "openai-compatible",
+      apiKey: "secret"
+    });
+    expect(grok3mini).toMatchObject({ reasoning_effort: "high" });
   });
 
   it("asks DeepSeek to keep deep-thinking content in Chinese for Chinese conversations", async () => {
@@ -4912,7 +4922,9 @@ describe("native provider tool protocols", () => {
     });
 
     const request = mocks.responsesCreate.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(request.reasoning).toEqual({ effort: "high", summary: "concise" });
+    // reasoning.effort 是 OpenAI Responses 的参数：DeepSeek 官方未在 Responses
+    // 协议文档化该入参，请求不得携带（thinking 由服务端默认开启）。
+    expect(request.reasoning).toBeUndefined();
     expect(request.input).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: "assistant" }),
       expect.objectContaining({
