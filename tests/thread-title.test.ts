@@ -128,6 +128,23 @@ describe("parseThreadTitleResponse", () => {
     expect(parseThreadTitleResponse("```\n修复登录超时\n```")).toBe("修复登录超时");
   });
 
+  it("unwraps JSON wrappers some models emit instead of the bare title", () => {
+    expect(parseThreadTitleResponse('{"answer": "提交并推送代码"}')).toBe("提交并推送代码");
+    expect(parseThreadTitleResponse('{"title": "修复 Folia 集成"}')).toBe("修复 Folia 集成");
+    expect(parseThreadTitleResponse('{"标题": "排查下载卡死"}')).toBe("排查下载卡死");
+    // 容忍 JSON 后带尾随文本 / 换行的真实模型输出。
+    expect(parseThreadTitleResponse('{"answer": "优化渲染性能"}\n')).toBe("优化渲染性能");
+  });
+
+  it("unwraps label tags and answer prefixes", () => {
+    expect(parseThreadTitleResponse("<answer>提交并推送代码</answer>")).toBe("提交并推送代码");
+    expect(parseThreadTitleResponse("answer: 修复登录超时")).toBe("修复登录超时");
+  });
+
+  it("falls back to the first string value inside an unknown JSON wrapper", () => {
+    expect(parseThreadTitleResponse('{"topic": "调整会话标题规则"}')).toBe("调整会话标题规则");
+  });
+
   it("rejects placeholders, empty answers and over-long answers", () => {
     expect(parseThreadTitleResponse("")).toBeNull();
     expect(parseThreadTitleResponse("无法概括")).toBeNull();

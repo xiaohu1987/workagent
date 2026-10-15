@@ -151,6 +151,53 @@ export function buildThreadTitlePrompt(content: string): string {
 }
 
 /**
+ * Some models (notably GLM) ignore "output the title only" and wrap the title
+ * in a JSON object such as {"answer": "提交并推送代码"}. Pull the title string
+ * back out; preferred keys first, then any string value. Returns null when the
+ * text is not a recognizable JSON wrapper.
+ */
+const TITLE_JSON_KEYS = ["title", "answer", "标题", "会话标题", "summary", "text", "content", "response"];
+
+function extractTitleFromJsonWrapper(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    // Malformed JSON (trailing prose, unescaped quotes): fall back to a regex
+    // over the preferred keys before giving up.
+    const match = trimmed.match(
+      new RegExp(`"(?:${TITLE_JSON_KEYS.join("|")})"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, "i")
+    );
+    if (!match) return null;
+    return match[1]
+      .replace(/\\"/g, "\"")
+      .replace(/\\n/g, " ")
+      .replace(/\\\\/g, "\\")
+      .trim() || null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  for (const key of TITLE_JSON_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  for (const value of Object.values(record)) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/** Strips XML-ish label tags such as <answer>…</answer> around the title. */
+function stripLabelTags(value: string): string {
+  return value
+    .replace(/^<\/?(?:answer|title|标题|summary|response)>\s*/giu, "")
+    .replace(/\s*<\/(?:answer|title|标题|summary|response)>$/giu, "")
+    .trim();
+}
+
+/**
  * Cleans one model answer into a title, or returns null when the answer is
  * unusable (empty, still a placeholder, or far longer than requested) so the
  * caller keeps the fallback title instead of writing junk.
@@ -159,15 +206,17 @@ export function parseThreadTitleResponse(raw: string): string | null {
   const text = raw.replace(/\r\n?/g, "\n").trim();
   if (!text) return null;
   const unwrapped = text.replace(/^```[a-zA-Z]*\s*/u, "").replace(/```$/u, "").trim();
-  const firstLine = unwrapped
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!firstLine) return null;
+  // A JSON wrapper replaces the whole answer; otherwise take the first line.
+  const candidate = extractTitleFromJsonWrapper(unwrapped)
+    ?? unwrapped
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+  if (!candidate) return null;
 
   const title = trimTitleEdges(
-    firstLine
-      .replace(/^(?:标题|会话标题|title)\s*[:：]\s*/iu, "")
+    stripLabelTags(candidate)
+      .replace(/^(?:标题|会话标题|title|answer|答案)\s*[:：]\s*/iu, "")
       .replace(/\s+/gu, " ")
   );
   if (!title) return null;
