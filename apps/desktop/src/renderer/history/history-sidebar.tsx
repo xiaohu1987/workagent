@@ -96,6 +96,8 @@ type Props = {
   documentViewerOpenCount?: number;
   onOpenDownloads: () => void;
   downloadsActive?: boolean;
+  /** 下载入口右侧的数量：正在下载（含解析中）的任务数，0 时入口不显示徽标。 */
+  downloadsActiveCount?: number;
   /** Rail entries the user tucked into the "更多" flyout; empty keeps them inline. */
   hiddenSidebarItems?: SidebarNavItemId[];
   onOpenSearch: () => void;
@@ -115,7 +117,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, onOpenDownloads, downloadsActive = false, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, onOpenDownloads, downloadsActive = false, downloadsActiveCount = 0, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
@@ -478,11 +480,12 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
     downloads: downloadsActive
   };
   /**
-   * 入口上的可选数量：目前只有「查看文档」带一个，表示切走任务后仍留在面板里的文档数。
-   * 数量为 0 时入口不渲染任何徽标，侧栏保持干净。
+   * 入口上的可选数量：「查看文档」带已打开的文档数，「下载」带正在下载的
+   * 任务数。数量为 0 时入口不渲染任何徽标，侧栏保持干净。
    */
   const railItemCounts: Partial<Record<SidebarNavItemId, number>> = {
-    documentViewer: documentViewerOpenCount
+    documentViewer: documentViewerOpenCount,
+    downloads: downloadsActiveCount
   };
 
   function renderRailItem(id: SidebarNavItemId) {
@@ -491,7 +494,7 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
       <button key={id} className={`sidebar-nav-button ${railItemActiveStates[id] ? "is-active" : ""}`} type="button" onClick={railItemHandlers[id]}>
         <span className="sidebar-nav-icon">{SIDEBAR_NAV_ITEM_ICONS[id]}</span>
         <span>{SIDEBAR_NAV_ITEM_LABELS[id]}</span>
-        {count > 0 ? <span className="sidebar-nav-count" aria-label={`已打开 ${count} 个文档`}>{count}</span> : null}
+        {count > 0 ? <span className="sidebar-nav-count" aria-label={`${SIDEBAR_NAV_ITEM_LABELS[id]} ${count}`}>{count}</span> : null}
       </button>
     );
   }
@@ -506,7 +509,7 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
       <div className="sidebar-nav">
         <button className="sidebar-nav-button" onClick={onCreateTask}><span className="sidebar-nav-icon"><IconChatBubbles /></span><span>新建任务</span><span className="sidebar-nav-plus"><IconPlus /></span></button>
         {railItems.visible.map(renderRailItem)}
-        <SidebarNavMore items={railItems.hidden} activeItemId={railItems.hidden.find((id) => railItemActiveStates[id]) ?? null} onSelect={openHiddenRailItem} />
+        <SidebarNavMore items={railItems.hidden} activeItemId={railItems.hidden.find((id) => railItemActiveStates[id]) ?? null} itemCounts={railItemCounts} onSelect={openHiddenRailItem} />
       </div>
       <div className="history-list" aria-label="任务与项目">
         {selectionMode ? (

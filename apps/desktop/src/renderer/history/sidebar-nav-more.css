@@ -68,6 +68,22 @@
   animation: sidebar-nav-more-in 140ms ease-out;
 }
 
+/* 浮层入口右侧的数量徽标（如「下载」的进行中任务数），与 rail 上的
+   .sidebar-nav-count 同一套视觉，但跟随浮层行高更紧凑。 */
+.sidebar-nav-more-item-count {
+  min-width: 20px;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 @keyframes sidebar-nav-more-in {
   from {
     opacity: 0;

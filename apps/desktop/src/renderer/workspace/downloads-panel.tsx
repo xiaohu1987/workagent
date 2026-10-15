@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import type { DownloadServiceSnapshot, DownloadTask } from "@shared-types";
+import type { DownloadFileInfo, DownloadServiceSnapshot, DownloadTask } from "@shared-types";
 import { IconClose, IconDownload, IconFolder } from "../icons";
 import { ConfirmationSheet } from "./confirmation-sheet";
 
@@ -32,7 +32,7 @@ function cleanIpcError(error: unknown): string {
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "未知大小";
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let value = bytes;
   let unit = "B";
@@ -41,7 +41,9 @@ function formatBytes(bytes: number): string {
     value /= 1024;
     unit = next;
   }
-  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${unit}`;
+  // 小数最多保留两位：≥100 取整、≥10 一位、其余两位。
+  const text = value >= 100 ? String(Math.round(value)) : value >= 10 ? value.toFixed(1) : value.toFixed(2);
+  return `${text} ${unit}`;
 }
 
 function formatSpeed(bps: number): string {
@@ -83,6 +85,77 @@ export function DownloadsPanel({ motionPhase, snapshot, setSnapshot, onClose }: 
   } | null>(null);
   const [deleteFileToo, setDeleteFileToo] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // 任务详情展开（点击任务行）：BT 多附件显示逐文件进度，HTTP 显示分段进度。
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  // BT 多附件勾选弹窗：needsFileSelection 的任务自动弹一次，手动关过就不再自动弹。
+  const [fileSelectTaskId, setFileSelectTaskId] = useState<string | null>(null);
+  const [fileChecked, setFileChecked] = useState<Set<number>>(() => new Set());
+  // 勾选弹窗列表排序：null=种子原始顺序；点表头按名字/大小切换升/降序。
+  const [fileSort, setFileSort] = useState<{ key: "name" | "size" | null; dir: "asc" | "desc" }>({ key: null, dir: "asc" });
+  const [fileSelectBusy, setFileSelectBusy] = useState(false);
+  const dismissedFileSelectionRef = useRef<Set<string>>(new Set());
+
+  const fileSelectTask = fileSelectTaskId ? activeTasks.find((task) => task.id === fileSelectTaskId) ?? null : null;
+
+  function openFileSelection(task: DownloadTask) {
+    setExpandedTaskId(task.id);
+    setFileChecked(new Set((task.files ?? []).map((file) => file.index)));
+    setFileSort({ key: null, dir: "asc" });
+    setFileSelectTaskId(task.id);
+  }
+
+  function toggleFileSort(key: "name" | "size") {
+    setFileSort((current) =>
+      current.key === key
+        ? { key, dir: current.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "asc" }
+    );
+  }
+
+  function toggleFileChecked(index: number, checked: boolean) {
+    setFileChecked((current) => {
+      const next = new Set(current);
+      if (checked) next.add(index);
+      else next.delete(index);
+      return next;
+    });
+  }
+
+  function toggleAllFiles(checked: boolean) {
+    const files = fileSelectTask?.files ?? [];
+    setFileChecked(checked ? new Set(files.map((file) => file.index)) : new Set());
+  }
+
+  useEffect(() => {
+    if (fileSelectTaskId) return;
+    const pending = activeTasks.find((task) => task.needsFileSelection && !dismissedFileSelectionRef.current.has(task.id));
+    if (pending) openFileSelection(pending);
+  }, [activeTasks, fileSelectTaskId]);
+
+  async function confirmFileSelection() {
+    if (!fileSelectTask || fileSelectBusy) return;
+    setFileSelectBusy(true);
+    setError("");
+    try {
+      await window.codexh.selectDownloadFiles(fileSelectTask.id, [...fileChecked]);
+      setFileSelectTaskId(null);
+    } catch (caught) {
+      setError(cleanIpcError(caught));
+    } finally {
+      setFileSelectBusy(false);
+    }
+  }
+
+  // 子任务级控制：BT 多附件任务里对单个文件暂停/继续/移除。
+  // 任务快照由主进程推送更新，这里只发起动作并展示错误。
+  async function controlFile(taskId: string, index: number, action: "pause" | "resume" | "remove") {
+    setError("");
+    try {
+      await window.codexh.controlDownloadFile(taskId, index, action);
+    } catch (caught) {
+      setError(cleanIpcError(caught));
+    }
+  }
 
   // 安装期间订阅主进程的包管理器输出：最后一行作日志提示，
   // pnpm 的 "Progress: resolved N, reused N, downloaded N" 解析为真实百分比。
@@ -259,11 +332,18 @@ export function DownloadsPanel({ motionPhase, snapshot, setSnapshot, onClose }: 
         ) : (
           <div className="downloads-list">
             {activeTasks.map((task) => (
-              <div key={task.id} className={`downloads-item is-${task.status}`}>
-                <div className="downloads-item-main">
+              <div
+                key={task.id}
+                className={`downloads-item is-${task.status} ${expandedTaskId === task.id ? "is-expanded" : ""}`}
+              >
+                <div
+                  className={`downloads-item-main ${task.kind === "p2p" && (task.files?.length ?? 0) > 0 || task.kind === "http" && task.segments.length > 0 ? "is-clickable" : ""}`}
+                  title={task.kind === "p2p" && (task.files?.length ?? 0) > 0 || task.kind === "http" && task.segments.length > 0 ? "点击展开/收起任务详情" : undefined}
+                  onClick={() => setExpandedTaskId((current) => (current === task.id ? null : task.id))}
+                >
                   <div className="downloads-item-title" title={task.filePath || task.url}>
                     <span className="downloads-item-name">{task.fileName}</span>
-                    <span className={`downloads-item-status is-${task.status}`}>{STATUS_LABELS[task.status]}</span>
+                    <span className={`downloads-item-status is-${task.status}`}>{task.needsFileSelection ? "待选择文件" : STATUS_LABELS[task.status]}</span>
                   </div>
                   <div className="downloads-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((task.progress >= 0 ? task.progress : 0) * 100)}>
                     <span className="downloads-progress-fill" style={{ width: task.progress >= 0 ? `${Math.min(100, task.progress * 100)}%` : "100%" }} data-indeterminate={task.progress < 0 ? "true" : undefined} />
@@ -278,13 +358,14 @@ export function DownloadsPanel({ motionPhase, snapshot, setSnapshot, onClose }: 
                   </div>
                 </div>
                 <div className="downloads-item-actions">
-                  {task.status === "downloading" ? <button type="button" className="downloads-action-button" title="暂停" onClick={() => { void window.codexh.pauseDownload(task.id); }}>暂停</button> : null}
-                  {task.status === "paused" ? <button type="button" className="downloads-action-button is-accent" title="继续" onClick={() => { void window.codexh.resumeDownload(task.id); }}>继续</button> : null}
+                  {task.status === "downloading" ? <button type="button" className="downloads-action-button" title="暂停" onClick={(event) => { event.stopPropagation(); void window.codexh.pauseDownload(task.id); }}>暂停</button> : null}
+                  {task.status === "paused" ? <button type="button" className="downloads-action-button is-accent" title="继续" onClick={(event) => { event.stopPropagation(); void window.codexh.resumeDownload(task.id); }}>继续</button> : null}
                   <button
                     type="button"
                     className="downloads-action-button is-danger"
                     title="取消任务"
-                    onClick={() => {
+                    onClick={(event) => {
+                      event.stopPropagation();
                       setDeleteFileToo(false);
                       setPendingDelete({
                         id: task.id,
@@ -297,6 +378,63 @@ export function DownloadsPanel({ motionPhase, snapshot, setSnapshot, onClose }: 
                     }}
                   >取消</button>
                 </div>
+                {expandedTaskId === task.id ? (
+                  <div className="downloads-task-detail" onClick={(event) => event.stopPropagation()}>
+                    {task.kind === "p2p" && (task.files?.length ?? 0) > 0 ? (
+                      <div className="downloads-file-list" aria-label="下载文件明细">
+                        {(task.files ?? []).filter((file) => {
+                          // 没选中的文件不展示：已移除的直接隐藏；勾选弹窗里
+                          // 落选的也隐藏（单独暂停过的文件仍要显示，可继续）。
+                          if ((task.removedFiles ?? []).includes(file.index)) return false;
+                          const selected = task.selectedFiles;
+                          if (task.fileSelectionDone && selected && !selected.includes(file.index) && !(task.pausedFiles ?? []).includes(file.index)) return false;
+                          return true;
+                        }).map((file) => {
+                          const fileDone = file.length > 0 && file.downloaded >= file.length;
+                          const filePaused = (task.pausedFiles ?? []).includes(file.index);
+                          return (
+                            <div key={file.index} className="downloads-file-row">
+                              <span className="downloads-file-name" title={file.path || file.name}>{file.name}</span>
+                              <span className="downloads-progress downloads-file-progress" aria-hidden><span className="downloads-progress-fill" style={{ width: `${Math.min(100, Math.max(0, file.progress)) * 100}%` }} /></span>
+                              <span className="downloads-file-size">{formatBytes(file.downloaded)} / {formatBytes(file.length)}</span>
+                              {fileDone ? null : (
+                                <span className="downloads-file-actions">
+                                  {filePaused ? (
+                                    <button type="button" className="downloads-action-button is-accent" title="继续下载该文件" onClick={() => void controlFile(task.id, file.index, "resume")}>继续</button>
+                                  ) : (
+                                    <button type="button" className="downloads-action-button" title="仅暂停该文件" onClick={() => void controlFile(task.id, file.index, "pause")}>暂停</button>
+                                  )}
+                                  <button type="button" className="downloads-action-button is-danger" title="不再下载该文件" onClick={() => void controlFile(task.id, file.index, "remove")}>移除</button>
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : task.kind === "http" && task.segments.length > 0 ? (
+                      <div className="downloads-file-list" aria-label="下载分段明细">
+                        {task.segments.map((segment, index) => {
+                          const size = segment.end < 0 ? 0 : segment.end - segment.start + 1;
+                          const done = segment.end >= 0 && segment.downloaded >= size;
+                          return (
+                            <div key={index} className="downloads-file-row">
+                              <span className="downloads-file-name">分段 {index + 1}</span>
+                              <span className="downloads-progress downloads-file-progress" aria-hidden><span className="downloads-progress-fill" style={{ width: size > 0 ? `${Math.min(100, (segment.downloaded / size) * 100)}%` : "100%" }} /></span>
+                              <span className="downloads-file-size">{done ? "完成" : `${formatBytes(segment.downloaded)}${size > 0 ? ` / ${formatBytes(size)}` : ""}`}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {task.kind === "p2p" && (task.files?.length ?? 0) > 1 && !task.fileSelectionDone ? (
+                      <button
+                        type="button"
+                        className="downloads-action-button"
+                        onClick={() => openFileSelection(task)}
+                      >选择要下载的文件</button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -351,6 +489,87 @@ export function DownloadsPanel({ motionPhase, snapshot, setSnapshot, onClose }: 
         )}
       </div>
     </section>
+    {fileSelectTask ? (
+      <div className="project-sheet-overlay motion-overlay" data-motion={motionPhase}>
+        <div className="project-sheet confirm-sheet delete-confirm-sheet clear-chat-confirm-sheet downloads-file-select-sheet" role="dialog" aria-modal="true" aria-label="选择要下载的文件">
+          <div className="confirm-sheet-body delete-confirm-body clear-chat-confirm-body downloads-confirm-body downloads-file-select-body">
+            <div className="downloads-file-select-head">
+              <strong>选择要下载的文件</strong>
+              <p>识别到 {fileSelectTask.files?.length ?? 0} 个附件，只会下载勾选的文件。</p>
+            </div>
+            <div className="downloads-file-select-columns">
+              <button
+                type="button"
+                className={`downloads-file-select-sort ${fileSort.key === "name" ? "is-active" : ""}`}
+                title="按文件名排序"
+                onClick={() => toggleFileSort("name")}
+              >文件名{fileSort.key === "name" ? <span className="downloads-file-sort-arrow">{fileSort.dir === "asc" ? "↑" : "↓"}</span> : null}</button>
+              <button
+                type="button"
+                className={`downloads-file-select-sort downloads-file-select-sort-size ${fileSort.key === "size" ? "is-active" : ""}`}
+                title="按文件大小排序"
+                onClick={() => toggleFileSort("size")}
+              >大小{fileSort.key === "size" ? <span className="downloads-file-sort-arrow">{fileSort.dir === "asc" ? "↑" : "↓"}</span> : null}</button>
+            </div>
+            <div className="downloads-file-select-list" aria-label="附件列表">
+              {((): DownloadFileInfo[] => {
+                const files = fileSelectTask.files ?? [];
+                if (fileSort.key === null) return files;
+                const sorted = [...files].sort((a, b) =>
+                  fileSort.key === "size"
+                    ? a.length - b.length
+                    : a.name.localeCompare(b.name, "zh-Hans-CN", { numeric: true })
+                );
+                return fileSort.dir === "desc" ? sorted.reverse() : sorted;
+              })().map((file) => (
+                <label key={file.index} className="downloads-confirm-file">
+                  <input
+                    type="checkbox"
+                    checked={fileChecked.has(file.index)}
+                    onChange={(event) => toggleFileChecked(file.index, event.target.checked)}
+                  />
+                  <span className="downloads-file-select-name" title={file.path || file.name}>{file.name}</span>
+                  <span className="downloads-file-select-size">{formatBytes(file.length)}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="project-sheet-actions downloads-file-select-actions">
+            <label className="downloads-confirm-file downloads-file-select-all">
+              <input
+                type="checkbox"
+                checked={fileChecked.size > 0 && fileChecked.size === (fileSelectTask.files?.length ?? 0)}
+                ref={(element) => {
+                  if (element) {
+                    element.indeterminate = fileChecked.size > 0 && fileChecked.size < (fileSelectTask.files?.length ?? 0);
+                  }
+                }}
+                onChange={(event) => toggleAllFiles(event.target.checked)}
+              />
+              <span>{fileChecked.size === (fileSelectTask.files?.length ?? 0) ? "取消全选" : "全选"}</span>
+              <span className="downloads-file-select-count">已选 {fileChecked.size} / {fileSelectTask.files?.length ?? 0}</span>
+            </label>
+            <div className="downloads-file-select-buttons">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={fileSelectBusy}
+                onClick={() => {
+                  dismissedFileSelectionRef.current.add(fileSelectTask.id);
+                  setFileSelectTaskId(null);
+                }}
+              >暂不下载</button>
+              <button
+                className="button primary"
+                type="button"
+                disabled={fileChecked.size === 0 || fileSelectBusy}
+                onClick={() => void confirmFileSelection()}
+              >{fileSelectBusy ? "提交中…" : `下载勾选的 ${fileChecked.size} 个文件`}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    ) : null}
     {pendingDelete ? (
       <ConfirmationSheet
         motionPhase={motionPhase}
@@ -362,6 +581,9 @@ export function DownloadsPanel({ motionPhase, snapshot, setSnapshot, onClose }: 
         confirmLabel={pendingDelete.mode === "history" ? "确认删除" : "确认取消"}
         confirmVariant="danger"
         busy={deleteBusy}
+        // downloads-confirm-body 把勾选行的样式作用域收敛到这里，避免被确认条
+        // 里其它网格/对齐规则拆散「勾选框 + 文案」的同一行布局。
+        bodyClassName="delete-confirm-body clear-chat-confirm-body downloads-confirm-body"
         onClose={() => setPendingDelete(null)}
         onConfirm={() => void confirmDelete()}
       >

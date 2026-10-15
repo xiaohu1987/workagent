@@ -11,6 +11,7 @@ import type {
   MessageAttachment,
   BrowserTabRecord,
   KnowledgeBaseRecord,
+  DownloadTask,
   RuntimeToolCall,
   SubagentResultEnvelope,
   SubagentWaitResult,
@@ -329,6 +330,11 @@ export interface ToolRuntimeContext {
   describeDatabaseSchema?: (sourceId: string, schema?: string) => Promise<any>;
   queryDatabase?: (sourceId: string, sql: string, parameters: unknown[], maxRows?: number) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
   executeDatabase?: (sourceId: string, sql: string, parameters: unknown[], operation: "insert" | "update" | "delete") => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number; durationMs: number }>;
+  /** Start a task in the app download manager; dir omitted = configured default download dir. */
+  startDownload?: (input: { url: string; dir?: string }) => Promise<DownloadTask>;
+  /** Live snapshot of active + finished download tasks (progress, speed, status). */
+  listDownloads?: () => Promise<{ tasks: DownloadTask[]; history: DownloadTask[]; defaultDir: string; p2pAvailable: boolean }>;
+  controlDownload?: (input: { taskId: string; action: "pause" | "resume" | "cancel" }) => Promise<void>;
   openExternalUrl?: (url: string) => Promise<void> | void;
   addKnowledgeNote?: (input: {
     title: string;
@@ -423,6 +429,7 @@ const TOOL_ALIASES: Record<string, string> = {
 
 const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "apply_patch", "fs.write_file", "search_replace", "fs.mkdir", "fs.rename", "fs.delete", "fs.copy", "shell.exec", "shell.cancel_active", "request_permissions", "request_user_input", "mcp.call", "database.list_sources", "database.describe_schema", "database.query", "database.insert", "database.update", "database.delete", "database.federated_query",
+  "download.start", "download.control",
   "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
   "knowledge.create", "knowledge.add", "knowledge.update", "knowledge.delete", "todo.write",
@@ -1211,6 +1218,126 @@ function registerBuiltinTools(runtime: ToolRuntime): void {
           diagnosis: terminal.diagnosis
         }
       };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "download.start",
+      description:
+        "Start a download in the app's download manager (also visible in the downloads panel). Supports http(s) URLs and magnet:/.torrent links. Omit dir to save into the configured default download directory. Returns immediately with a task id; poll download.list to track progress. If the download stalls, consider pause+resume via download.control, cancel, or a different source/method.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "http(s) URL, magnet: link, or .torrent file URL." },
+          dir: { type: "string", description: "Optional absolute target directory; omit to use the default download directory." }
+        },
+        required: ["url"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      if (!ctx.startDownload) {
+        return { ok: false, content: "下载管理器在当前运行环境不可用。" };
+      }
+      const url = String(args.url ?? "").trim();
+      if (!url) return { ok: false, content: "download.start 缺少 url 参数。" };
+      try {
+        const task = await ctx.startDownload({ url, dir: typeof args.dir === "string" && args.dir.trim() ? args.dir.trim() : undefined });
+        return {
+          ok: true,
+          content: `下载已启动：${task.fileName} → ${task.filePath || "（路径解析中）"} [id=${task.id} status=${task.status}]`,
+          json: { task }
+        };
+      } catch (error) {
+        return { ok: false, content: `启动下载失败：${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+  );
+
+  runtime.register(
+    {
+      name: "download.list",
+      description:
+        "List download tasks with live progress (received/total bytes, speed, status, error). Call it right after download.start and repeatedly afterwards to monitor: a task whose speedBps stays ~0 across consecutive checks, or a p2p task stuck in \"probing\" with 0 peers/dht nodes, is likely stalled — then pause+resume via download.control, cancel it, or switch to another method/source. Set include_history=true to also see finished tasks (completed/failed/canceled) with their final file paths.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          include_history: { type: "boolean", description: "Also include finished tasks, newest first (default false)." }
+        }
+      },
+      riskLevel: "low",
+      parallelSafe: true
+    },
+    async (args, ctx) => {
+      if (!ctx.listDownloads) {
+        return { ok: false, content: "下载管理器在当前运行环境不可用。" };
+      }
+      const snapshot = await ctx.listDownloads();
+      const describe = (task: DownloadTask): string => {
+        const total = task.totalBytes > 0 ? `${(task.totalBytes / 1048576).toFixed(1)}MB` : "?";
+        const received = (task.receivedBytes / 1048576).toFixed(1);
+        const percent = task.progress >= 0 ? ` ${Math.round(task.progress * 100)}%` : "";
+        const speed = task.speedBps > 0 ? `${(task.speedBps / 1024).toFixed(0)}KB/s` : "0KB/s";
+        const parts = [
+          `[${task.status}] ${task.fileName} (${task.kind}) ${received}/${total}MB${percent} ${speed}`,
+          `id=${task.id}`,
+          `path=${task.filePath || "?"}`
+        ];
+        if (task.kind === "p2p") parts.push(`peers=${task.peers ?? 0} dht=${task.dhtNodes ?? 0}`);
+        if (task.error) parts.push(`error=${task.error}`);
+        return parts.join(" | ");
+      };
+      const activeLines = snapshot.tasks.map(describe);
+      const historyLines = args.include_history === true ? snapshot.history.slice(0, 20).map(describe) : [];
+      const content = [
+        `下载目录：${snapshot.defaultDir || "（未配置，使用系统回退目录）"}`,
+        activeLines.length > 0 ? `进行中的任务：\n${activeLines.join("\n")}` : "进行中的任务：无",
+        historyLines.length > 0 ? `最近完成/失败：\n${historyLines.join("\n")}` : ""
+      ].filter(Boolean).join("\n\n");
+      return {
+        ok: true,
+        content,
+        json: {
+          defaultDir: snapshot.defaultDir,
+          p2pAvailable: snapshot.p2pAvailable,
+          tasks: snapshot.tasks,
+          ...(args.include_history === true ? { history: snapshot.history.slice(0, 20) } : {})
+        }
+      };
+    }
+  );
+
+  runtime.register(
+    {
+      name: "download.control",
+      description:
+        "Pause, resume, or cancel a download task by id (ids come from download.start / download.list). Cancel removes the task and deletes the partial file; a paused http task resumes from its persisted offset.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string" },
+          action: { type: "string", enum: ["pause", "resume", "cancel"] }
+        },
+        required: ["taskId", "action"]
+      },
+      riskLevel: "medium"
+    },
+    async (args, ctx) => {
+      if (!ctx.controlDownload) {
+        return { ok: false, content: "下载管理器在当前运行环境不可用。" };
+      }
+      const taskId = String(args.taskId ?? "").trim();
+      const action = String(args.action ?? "");
+      if (!taskId || !["pause", "resume", "cancel"].includes(action)) {
+        return { ok: false, content: "download.control 需要 taskId 与 action（pause/resume/cancel）。" };
+      }
+      try {
+        await ctx.controlDownload({ taskId, action: action as "pause" | "resume" | "cancel" });
+        return { ok: true, content: `下载任务 ${taskId} 已${action === "pause" ? "暂停" : action === "resume" ? "恢复" : "取消"}。`, json: { taskId, action } };
+      } catch (error) {
+        return { ok: false, content: `下载控制失败：${error instanceof Error ? error.message : String(error)}` };
+      }
     }
   );
 

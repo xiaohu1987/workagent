@@ -580,6 +580,8 @@ async function createWindow(): Promise<void> {
     emit: (snapshot) => mainWindow?.webContents.send("downloads:state", snapshot),
     log: (kind, payload) => backend.appendRuntimeLog(kind, payload)
   });
+  // chat 的 download.* 工具经 backend 桥接到这里（启动/查进度/暂停恢复取消）。
+  backend.attachDownloadService(downloads);
   void downloads.start().catch((error) => {
     console.error("[downloads] Failed to restore persisted tasks", error);
   });
@@ -838,6 +840,14 @@ function registerIpc(): void {
     downloads?.resume(id);
     return true;
   });
+  ipcMain.handle("downloads:select-files", (_event, id: string, indexes: number[]) =>
+    downloads!.selectDownloadFiles(id, Array.isArray(indexes) ? indexes : [])
+  );
+  ipcMain.handle(
+    "downloads:control-file",
+    (_event, id: string, index: number, action: "pause" | "resume" | "remove") =>
+      downloads!.controlDownloadFile(id, Number(index), action)
+  );
   ipcMain.handle("downloads:cancel", (_event, id: string) => downloads!.cancel(id));
   ipcMain.handle("downloads:remove-history", (_event, id: string) => downloads!.removeHistory(id));
   ipcMain.handle("downloads:delete-file", (_event, filePath: string) => downloads!.deleteFile(filePath));

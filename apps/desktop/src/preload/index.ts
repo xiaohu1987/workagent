@@ -388,6 +388,9 @@ const api = {
   addDownload: (payload: { url: string; dir?: string }) => ipcRenderer.invoke("downloads:add", payload),
   pauseDownload: (id: string) => ipcRenderer.invoke("downloads:pause", id),
   resumeDownload: (id: string) => ipcRenderer.invoke("downloads:resume", id),
+  selectDownloadFiles: (id: string, indexes: number[]) => ipcRenderer.invoke("downloads:select-files", id, indexes),
+  controlDownloadFile: (id: string, index: number, action: "pause" | "resume" | "remove") =>
+    ipcRenderer.invoke("downloads:control-file", id, index, action),
   cancelDownload: (id: string) => ipcRenderer.invoke("downloads:cancel", id),
   removeDownloadHistory: (id: string) => ipcRenderer.invoke("downloads:remove-history", id),
   deleteDownloadFile: (filePath: string) => ipcRenderer.invoke("downloads:delete-file", filePath),

@@ -328,6 +328,7 @@ export class DownloadService {
         break;
       }
       case "stats": {
+        const rawFiles = Array.isArray(msg.files) ? msg.files : [];
         const stats: P2pTorrentStats = {
           peers: typeof msg.peers === "number" ? msg.peers : 0,
           downloaded: typeof msg.downloaded === "number" ? msg.downloaded : 0,
@@ -335,7 +336,17 @@ export class DownloadService {
           length: typeof msg.length === "number" ? msg.length : -1,
           dhtNodes: typeof msg.dhtNodes === "number" ? msg.dhtNodes : 0,
           hasMetadata: msg.hasMetadata === true,
-          name: typeof msg.name === "string" ? msg.name : ""
+          name: typeof msg.name === "string" ? msg.name : "",
+          files: rawFiles
+            .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+            .map((entry, index) => ({
+              index: typeof entry.index === "number" ? entry.index : index,
+              name: typeof entry.name === "string" ? entry.name : "",
+              path: typeof entry.path === "string" ? entry.path : "",
+              length: typeof entry.length === "number" ? entry.length : 0,
+              downloaded: typeof entry.downloaded === "number" ? entry.downloaded : 0,
+              progress: typeof entry.progress === "number" ? entry.progress : 0
+            }))
         };
         this.#torrentStatsCache.set(id, stats);
         // 首条 stats = 引擎已受理该任务，唤醒 add 握手（元数据解析不再阻塞 add）。
@@ -569,6 +580,85 @@ export class DownloadService {
     this.#emit();
   }
 
+  /**
+   * 子任务（单文件）级控制：暂停=该文件暂不拉取分片；继续=恢复；
+   * 删除=移出下载集合（BT 分片交错存储，已落盘部分无法精确抹除，仅不再继续）。
+   * helper 侧同步更新它的选中集合，避免整任务 resume 时把暂停的文件重新选上。
+   */
+  public async controlDownloadFile(id: string, index: number, action: "pause" | "resume" | "remove"): Promise<DownloadTask> {
+    const task = this.#tasks.get(id);
+    if (!task) throw new Error("下载任务不存在或已结束。");
+    if (task.kind !== "p2p") throw new Error("仅 BT/磁力任务支持子任务控制。");
+    if (!Number.isInteger(index) || index < 0 || (task.files?.length ?? 0) <= index) {
+      throw new Error("文件序号无效。");
+    }
+    if (action !== "pause" && action !== "resume" && action !== "remove") {
+      throw new Error("未知的子任务操作。");
+    }
+    this.#p2pSend({ type: "control-file", id, index, action });
+    const paused = new Set(task.pausedFiles ?? []);
+    const removed = new Set(task.removedFiles ?? []);
+    const selected = new Set(task.selectedFiles ?? (task.files ?? []).map((file) => file.index));
+    if (action === "resume") {
+      paused.delete(index);
+      removed.delete(index);
+      selected.add(index);
+    } else {
+      selected.delete(index);
+      if (action === "pause") {
+        paused.add(index);
+        removed.delete(index);
+      } else {
+        removed.add(index);
+        paused.delete(index);
+      }
+    }
+    task.selectedFiles = [...selected].sort((a, b) => a - b);
+    task.pausedFiles = [...paused].sort((a, b) => a - b);
+    task.removedFiles = [...removed].sort((a, b) => a - b);
+    // 未走过勾选弹窗的任务首次做子任务控制时，把进度口径切到选择聚合。
+    if (!task.fileSelectionDone && (task.files?.length ?? 0) > 1) {
+      task.fileSelectionDone = true;
+      task.needsFileSelection = false;
+    }
+    await this.#persistTask(task).catch(() => undefined);
+    this.#options.log("download.p2p_file_control", { id, index, action });
+    this.#emit();
+    return this.#publicTask(task);
+  }
+
+  /**
+   * BT 多附件任务的文件勾选结果：把选择交给引擎（未勾选的文件 deselect），
+   * 恢复任务，并把任务进度口径切到「勾选的文件」聚合。
+   */
+  public async selectDownloadFiles(id: string, indexes: number[]): Promise<DownloadTask> {
+    const task = this.#tasks.get(id);
+    if (!task) throw new Error("下载任务不存在或已结束。");
+    if (task.kind !== "p2p") throw new Error("仅 BT/磁力任务支持按文件选择下载。");
+    const unique = [...new Set(indexes.filter((index) => Number.isInteger(index) && index >= 0))].sort((a, b) => a - b);
+    if (unique.length === 0) throw new Error("请至少勾选一个要下载的文件。");
+    this.#p2pSend({ type: "select-files", id, indexes: unique });
+    task.selectedFiles = unique;
+    task.fileSelectionDone = true;
+    task.needsFileSelection = false;
+    if ((task.files?.length ?? 0) > 0) {
+      const selected = new Set(unique);
+      let total = 0;
+      for (const file of task.files ?? []) {
+        if (selected.has(file.index)) total += file.length;
+      }
+      if (total > 0) task.totalBytes = total;
+    }
+    if (task.status === "paused") {
+      this.#torrents.get(id)?.resume();
+      task.status = "downloading";
+    }
+    await this.#persistTask(task).catch(() => undefined);
+    this.#options.log("download.p2p_files_selected", { id: task.id, selected: unique.length });
+    this.#emit();
+    return this.#publicTask(task);
+  }
+
   public async cancel(id: string): Promise<void> {
     const task = this.#tasks.get(id);
     if (!task) return;
@@ -791,7 +881,9 @@ export class DownloadService {
 
     try {
       for await (const chunk of response) {
-        if (controller.signal.aborted) return;
+        // 双保险：除了 abort 信号，也直接看任务状态。万一出现「旧 controller
+        // 还挂着新循环」的路径，暂停/取消后的第一个 chunk 就会停在这里。
+        if (controller.signal.aborted || task.status !== "downloading") return;
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBufferLike);
         if (!buffer.length) continue;
         await task.fileHandle.write(buffer, 0, buffer.length, segment.start + segment.downloaded);
@@ -1022,10 +1114,42 @@ export class DownloadService {
       if (stats.dhtNodes !== task.dhtNodes) { task.dhtNodes = stats.dhtNodes; changed = true; }
       if (stats.hasMetadata) {
         if (stats.name && stats.name !== task.fileName) { task.fileName = stats.name; changed = true; }
-        if (stats.length !== task.totalBytes) { task.totalBytes = stats.length; changed = true; }
-        if (stats.downloaded !== task.receivedBytes) { task.receivedBytes = stats.downloaded; changed = true; }
-        if (stats.progress !== task.progress) { task.progress = stats.progress; changed = true; }
+        if (stats.files.length > 0) task.files = stats.files;
+        // 多附件任务：元数据一到就暂停等勾选，避免把用户不想要的文件全量拉下来。
+        // 单文件种子与已做过选择的任务不受影响。
+        if (stats.files.length > 1 && !task.fileSelectionDone && task.status === "downloading") {
+          entry?.pause();
+          task.status = "paused";
+          task.speedBps = 0;
+          task.needsFileSelection = true;
+          this.#options.log("download.p2p_files_pending_selection", { id: task.id, files: stats.files.length });
+          changed = true;
+        }
+        if (task.status !== "paused") {
+          if (stats.downloaded !== task.receivedBytes) { task.receivedBytes = stats.downloaded; changed = true; }
+          if (stats.progress !== task.progress) { task.progress = stats.progress; changed = true; }
+        }
+        // 做过选择后，任务进度按「勾选的文件」聚合，而不是全种子的 downloaded
+        // （后者还包含勾选前已经灌进来的字节）。
+        if (task.fileSelectionDone && task.selectedFiles && (task.files?.length ?? 0) > 0) {
+          const selected = new Set(task.selectedFiles);
+          let received = 0;
+          let total = 0;
+          for (const file of task.files ?? []) {
+            if (!selected.has(file.index)) continue;
+            received += file.downloaded;
+            total += file.length;
+          }
+          task.receivedBytes = received;
+          task.totalBytes = total > 0 ? total : task.totalBytes;
+          task.progress = total > 0 ? Math.min(1, received / total) : task.progress;
+          changed = true;
+        }
       }
+      // 暂停态不回灌字节数：webtorrent 的 pause 是软的（不取消在途分片请求，
+      // peer 队列里的数据还会灌几秒，torrent.downloaded 持续上涨）。这里不挡住，
+      // 界面就会出现「已暂停但进度条还在动」。恢复时 stats 会重新对齐。
+      // （上面已处理 paused 的聚合路径，这里只挡 torrent 全局字节数。）
     }
     // 元数据已到（attach 回调里也会转一次，这里兜底解析期轮询路径）。
     if (task.status === "probing" && stats?.hasMetadata) {
@@ -1167,6 +1291,8 @@ type P2pTorrentStats = {
   dhtNodes: number;
   hasMetadata: boolean;
   name: string;
+  /** 元数据解析后的文件明细（多附件任务的详情展开与勾选弹窗数据源）。 */
+  files: Array<{ index: number; name: string; path: string; length: number; downloaded: number; progress: number }>;
 };
 
 /**
@@ -1193,6 +1319,7 @@ function send(msg) { try { process.stdout.write(JSON.stringify(msg) + "\n"); } c
     client.on("error", (e) => send({ type: "client-error", message: String((e && e.message) || e) }));
     send({ type: "ready", node: process.version });
     const torrents = new Map();
+    const selectedByTorrent = new Map();
     const rl = readline.createInterface({ input: process.stdin, terminal: false });
     rl.on("line", (line) => {
       let cmd = null;
@@ -1216,6 +1343,15 @@ function send(msg) { try { process.stdout.write(JSON.stringify(msg) + "\n"); } c
                 const nodes = torrent.client && torrent.client.dht && torrent.client.dht.nodes;
                 dhtNodes = nodes ? (typeof nodes.count === "function" ? nodes.count() : (nodes.length || 0)) : 0;
               } catch (e2) { dhtNodes = 0; }
+              // 文件明细最多带 200 个，超大种子只取前 200 个文件做展示与勾选。
+              const files = (torrent.files || []).slice(0, 200).map((f, i) => ({
+                index: i,
+                name: f.name || "",
+                path: (f.path || f.name || "").slice(0, 500),
+                length: f.length || 0,
+                downloaded: f.downloaded || 0,
+                progress: f.progress || 0
+              }));
               send({
                 type: "stats", id: cmd.id,
                 peers: torrent.numPeers || 0,
@@ -1224,17 +1360,48 @@ function send(msg) { try { process.stdout.write(JSON.stringify(msg) + "\n"); } c
                 length: torrent.length || -1,
                 hasMetadata: !!torrent.name,
                 name: torrent.name || "",
-                dhtNodes: dhtNodes
+                dhtNodes: dhtNodes,
+                files: files
               });
             } catch (e3) { clearInterval(timer); }
           }, 1000);
-          torrent.once("close", () => { clearInterval(timer); torrents.delete(cmd.id); send({ type: "closed", id: cmd.id }); });
+          torrent.once("close", () => { clearInterval(timer); torrents.delete(cmd.id); selectedByTorrent.delete(cmd.id); send({ type: "closed", id: cmd.id }); });
         } catch (e) { send({ type: "error", id: cmd.id, message: String((e && e.message) || e) }); }
         return;
       }
       if (!existing) return;
-      if (cmd.type === "pause") existing.pause();
-      else if (cmd.type === "resume") existing.resume();
+      if (cmd.type === "pause") {
+        // pause 只是不再请求新分片，在途请求还会继续灌数据；把 wire 一并断开，
+        // 让「暂停」立刻见效（resume 后靠 DHT/tracker 重新握手，继续下载）。
+        existing.pause();
+        try { (existing.wires || []).forEach((w) => { try { w.destroy(); } catch (e4) {} }); } catch (e5) {}
+      }
+      else if (cmd.type === "resume") {
+        existing.resume();
+        // resume 会恢复引擎默认的「全选」，把用户勾选过的子集重新套回去。
+        const kept = selectedByTorrent.get(cmd.id);
+        if (kept) {
+          try { (existing.files || []).forEach((f, i) => { try { kept.has(i) ? f.select(1) : f.deselect(); } catch (e8) {} }); } catch (e9) {}
+        }
+      }
+      else if (cmd.type === "select-files") {
+        const wanted = new Set(Array.isArray(cmd.indexes) ? cmd.indexes.filter((n) => Number.isInteger(n)) : []);
+        try { (existing.files || []).forEach((f, i) => { try { wanted.has(i) ? f.select(1) : f.deselect(); } catch (e6) {} }); } catch (e7) {}
+        selectedByTorrent.set(cmd.id, wanted);
+      }
+      else if (cmd.type === "control-file") {
+        // 子任务级控制：维护引擎侧选中集合（整任务 resume 时会重放），再对单个文件
+        // 做 select/deselect；remove 与 pause 同为 deselect，差别只在主进程的 UI 状态。
+        const files = existing.files || [];
+        const kept = selectedByTorrent.get(cmd.id) || new Set(files.map((_, i) => i));
+        if (cmd.action === "resume") kept.add(cmd.index);
+        else kept.delete(cmd.index);
+        selectedByTorrent.set(cmd.id, kept);
+        const target = files[cmd.index];
+        if (target) {
+          try { cmd.action === "resume" ? target.select(1) : target.deselect(); } catch (e10) {}
+        }
+      }
       else if (cmd.type === "destroy") existing.destroy(cmd.options || {});
     });
     process.stdin.on("close", () => {

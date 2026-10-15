@@ -25,7 +25,10 @@ export interface ChatRuntimePolicy {
 
 const CHAT_READ_TOOLS = new Set([
   "fs.read_file",
-  "fs.read_directory"
+  "fs.read_directory",
+  // 下载进度是只读快照；download.start/control 不在此集合，但默认对 chat 放行
+  // （requiredChatAccess 对未知工具返回 null），chat 因此能启动/控制下载。
+  "download.list"
 ]);
 
 const CHAT_WRITE_TOOLS = new Set([

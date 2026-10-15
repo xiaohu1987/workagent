@@ -575,6 +575,7 @@ import {
   gpaModeLabel
 } from "./core/app-formatters";
 import {
+  formatByteSize,
   formatFileChangeAction,
   formatStorageBytes,
   formatUpdateDownloadSize,
@@ -891,6 +892,8 @@ export function App() {
     void window.codexh.getDownloadState().then((snapshot) => setDownloadsSnapshot(snapshot)).catch(() => undefined);
     return dispose;
   }, []);
+  // 正在下载的任务数（下载侧栏入口徽标）：probing 也在干活，算在内；暂停不算。
+  const activeDownloadCount = downloadsSnapshot.tasks.filter((task) => task.status === "downloading" || task.status === "probing").length;
   // 页签集合挂在 App 而不是面板内部：切去看任务时面板只是让出聊天区，
   // 面板卸载后已经打开的文档仍留在这一层，再点入口就能接着看。
   const documentTabs = useDocumentTabs(() => setIsDocumentViewerOpen(false));
@@ -1298,6 +1301,62 @@ export function App() {
     notificationStateRef: notificationCenterStateRef,
     dispatch: dispatchNotificationCenter
   });
+  // 下载任务 → 消息与进度：进行中的任务保持 running 条目（带进度），
+  // 结束后落一条未读通知（取消的静默，不提醒）。条目内容没变就不派发，
+  // 避免下载引擎每 500ms 的 tick 空转 reducer。
+  useEffect(() => {
+    const nowIso = new Date().toISOString();
+    const existing = new Map(notificationCenterStateRef.current.items.map((item) => [`${item.source}:${item.targetId}`, item]));
+    for (const task of downloadsSnapshot.tasks) {
+      const percent = task.totalBytes > 0 && task.progress >= 0 ? Math.min(100, Math.round(task.progress * 100)) : -1;
+      const speed = task.status === "downloading" && task.speedBps > 0 ? ` · ${formatByteSize(task.speedBps)}/s` : "";
+      const size = task.totalBytes > 0 ? `${formatByteSize(task.receivedBytes)} / ${formatByteSize(task.totalBytes)}` : formatByteSize(task.receivedBytes);
+      const detail = task.status === "paused" ? `已暂停 · ${size}` : task.status === "probing" ? "正在解析资源…" : `${size}${speed}`;
+      const progress = percent >= 0 ? { current: task.receivedBytes, total: task.totalBytes, percent } : undefined;
+      const current = existing.get(`download:${task.id}`);
+      if (current && current.status === "running" && current.title === task.fileName && current.detail === detail && current.progress?.percent === progress?.percent) {
+        continue;
+      }
+      dispatchNotificationCenter({
+        type: "start",
+        item: {
+          id: `download:${task.id}`,
+          source: "download",
+          targetId: task.id,
+          title: task.fileName,
+          detail,
+          status: "running",
+          createdAt: task.createdAt,
+          updatedAt: nowIso,
+          startedAt: task.createdAt,
+          unread: false,
+          progress
+        }
+      });
+    }
+    for (const task of downloadsSnapshot.history.slice(0, 20)) {
+      const current = existing.get(`download:${task.id}`);
+      // 只有存在未结束的条目才派发 finish：应用重启后历史里的老任务不再补发通知。
+      if (!current || isFinishedNotification(current)) continue;
+      const status = task.status === "completed" ? "completed" : task.status === "failed" ? "failed" : "cancelled";
+      const size = task.totalBytes > 0 ? formatByteSize(task.totalBytes) : formatByteSize(task.receivedBytes);
+      const detail = task.status === "completed"
+        ? `下载完成 · ${size}`
+        : task.status === "failed"
+          ? `下载失败${task.error ? `：${task.error.slice(0, 120)}` : ""}`
+          : "下载已取消";
+      dispatchNotificationCenter({
+        type: "finish",
+        source: "download",
+        targetId: task.id,
+        updatedAt: task.completedAt ?? nowIso,
+        status,
+        detail,
+        // 完成/失败算未读提醒；取消是用户主动行为，静默。
+        unread: task.status !== "canceled"
+      });
+    }
+  }, [downloadsSnapshot, dispatchNotificationCenter]);
   const userSkillGeneration = useUserSkillGeneration(
     refreshUserSkills,
     refreshSkills,
@@ -7521,6 +7580,10 @@ export function App() {
   async function openNotificationItem(item: NotificationCenterItem) {
     setIsNotificationCenterOpen(false);
     setHighlightedNotificationTarget(null);
+    if (item.source === "download") {
+      openDownloadsPanelEvent();
+      return;
+    }
     if (item.source === "skill-lab") {
       if (config) resetConfigDraft(config);
       setSettingsTab("capabilities");
@@ -7774,6 +7837,7 @@ export function App() {
         documentViewerActive={isDocumentViewerOpen}
         onOpenDownloads={openDownloadsPanelEvent}
         downloadsActive={isDownloadsPanelOpen}
+        downloadsActiveCount={activeDownloadCount}
         documentViewerOpenCount={documentTabs.tabs.length}
         hiddenSidebarItems={config?.desktop.hiddenSidebarItems}
         onOpenSearch={openHistorySearchEvent}

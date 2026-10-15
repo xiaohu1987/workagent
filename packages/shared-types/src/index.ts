@@ -1201,6 +1201,19 @@ export interface DownloadSegment {
 
 export type DownloadTaskStatus = "probing" | "downloading" | "paused" | "completed" | "failed" | "canceled";
 
+/** BT/磁力任务元数据解析后的单个文件条目（多附件任务的展开详情与选择弹窗用）。 */
+export interface DownloadFileInfo {
+  /** 文件在种子里的序号，select-files IPC 用它回传勾选结果。 */
+  index: number;
+  name: string;
+  /** 种子内的相对路径（多目录种子带子目录）。 */
+  path: string;
+  length: number;
+  downloaded: number;
+  /** 0..1 */
+  progress: number;
+}
+
 export interface DownloadTask {
   id: string;
   url: string;
@@ -1228,6 +1241,18 @@ export interface DownloadTask {
   completedAt?: string;
   etag?: string;
   lastModified?: string;
+  /** BT 多文件任务的文件明细（元数据解析后才有；单文件种子也带一个条目）。 */
+  files?: DownloadFileInfo[];
+  /** true = 多附件任务正等用户勾选要下载哪些文件（任务已自动暂停）。 */
+  needsFileSelection?: boolean;
+  /** 用户已提交过文件勾选（不再自动弹窗；进度按勾选聚合）。 */
+  fileSelectionDone?: boolean;
+  /** 用户勾选过的文件序号；用于把进度聚合到「实际要下的部分」。 */
+  selectedFiles?: number[];
+  /** 子任务级暂停：这些文件暂不拉取分片（可继续）。 */
+  pausedFiles?: number[];
+  /** 子任务级移除：这些文件被移出下载集合（可恢复）。 */
+  removedFiles?: number[];
 }
 
 export interface DownloadServiceSnapshot {

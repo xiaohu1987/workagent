@@ -31875,6 +31875,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
 
 .downloads-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
@@ -31970,20 +31971,306 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   line-height: 1.55;
 }
 
-/* 删除确认条里的「连文件一起删除」勾选项。 */
-.downloads-confirm-file {
+/*
+ * 删除确认条里的「连文件一起删除」勾选项。
+ * 作用域收敛在 .downloads-confirm-body 下（双类特异性），并把勾选框、文案的
+ * 排列全部显式声明，保证永远是「勾选框在左、文案紧随其右」的同一行，
+ * 不会被确认条里其它网格/对齐规则拆散。卡片式整行也更好点击。
+ */
+.downloads-confirm-body .downloads-confirm-file {
   display: flex;
+  flex-flow: row nowrap;
   align-items: center;
-  gap: 8px;
-  margin-top: 10px;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text, #f1f3f6);
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
   user-select: none;
 }
 
-.downloads-confirm-file input {
+.downloads-confirm-body .downloads-confirm-file:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.downloads-confirm-body .downloads-confirm-file input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 0;
   accent-color: var(--accent, #4c8bf5);
+  cursor: pointer;
+}
+
+.downloads-confirm-body .downloads-confirm-file span {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #c9cdd4;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+}
+
+/* 任务详情展开区：BT 逐文件 / HTTP 分段的进度明细。 */
+.downloads-item-main.is-clickable {
+  cursor: pointer;
+}
+
+.downloads-task-detail {
+  /* 详情移出主区域后成为整行 flex 子项：占满卡片全宽，列表因此拉宽。 */
+  flex: 1 1 100%;
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* 展开时任务操作按钮（暂停/继续/取消）贴顶，与主任务标题同行；
+ * 点击详情区不再触发展开/收起（详情已移出 onClick 主区域）。 */
+.downloads-item.is-expanded {
+  align-items: flex-start;
+}
+
+.downloads-item.is-expanded .downloads-item-actions {
+  margin-top: 2px;
+}
+
+.downloads-file-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.downloads-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+}
+
+.downloads-file-name {
+  flex: 0 1 50%;
+  min-width: 0;
+  color: #c9cdd4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.downloads-file-progress {
+  flex: 1 1 auto;
+  height: 4px;
+}
+
+.downloads-file-size {
+  flex: 0 0 auto;
+  color: #8f939d;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 子任务级操作：暂停/继续/移除，紧凑小按钮。 */
+.downloads-file-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.downloads-file-actions .downloads-action-button {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 附件勾选弹窗：加大版确认弹层，列表区滚动，全选/计数沉到底部左侧。 */
+.downloads-file-select-sheet {
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+}
+
+.downloads-file-select-body {
+  gap: 12px;
+  min-height: 0;
+}
+
+.downloads-file-select-head {
+  display: grid;
+  gap: 5px;
+}
+
+.downloads-file-select-head strong {
+  color: #f3f4f6;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.downloads-file-select-head p {
+  margin: 0;
+  color: #858a95;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* 表头排序行：左缩进对齐文件名列（行 padding 12 + 勾选框 15 + 间距 10），
+ * 「大小」固定 70px 右对齐，与数据行的 size 列对齐。 */
+.downloads-file-select-columns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 12px 4px 37px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.downloads-file-select-sort {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #8f939d;
+  font-size: 11.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.downloads-file-select-sort:hover {
+  color: #c9cdd4;
+}
+
+.downloads-file-select-sort.is-active {
+  color: #e6e9ee;
+}
+
+.downloads-file-select-sort-size {
+  flex: 0 0 70px;
+  justify-content: center;
+  text-align: right;
+}
+
+.downloads-file-sort-arrow {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.downloads-file-select-list {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-height: 0;
+  max-height: min(48vh, 460px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* 列表行：覆盖 .downloads-confirm-file 基础卡片的默认 margin，收紧为列表行观感。 */
+.downloads-confirm-body .downloads-file-select-list .downloads-confirm-file {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+}
+
+/* 名字占满剩余宽度、大小固定贴右：三类选择器压过基础规则里的 span 通配。 */
+.downloads-confirm-body .downloads-confirm-file .downloads-file-select-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #dde1e7;
+  font-size: 12.5px;
+}
+
+.downloads-confirm-body .downloads-confirm-file .downloads-file-select-size {
+  flex: 0 0 70px;
+  align-self: center;
+  color: #8f939d;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.downloads-file-select-name {
+  /* 长文件名折行完整展示，最多两行；整名见 title 悬浮。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  white-space: normal;
+  line-height: 1.45;
+}
+
+/* 底部操作区：左侧全选+已选计数，右侧按钮；不在 .downloads-confirm-body
+ * 作用域内，勾选行样式需要自带的完整声明。 */
+.downloads-file-select-actions {
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  box-sizing: border-box;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.downloads-file-select-all {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #e6e9ee;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.downloads-file-select-all:hover {
+  color: #ffffff;
+}
+
+.downloads-file-select-all input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent, #4c8bf5);
+  cursor: pointer;
+}
+
+.downloads-file-select-count {
+  flex: 0 0 auto;
+  color: #8f939d;
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.downloads-file-select-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
 }
 
 /* 操作按钮横排贴右，与全局列表行（接口卡片等）的对齐方式一致。 */

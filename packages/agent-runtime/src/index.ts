@@ -1523,6 +1523,9 @@ interface RuntimeServices {
   describeDatabaseSchema(sourceId: string, schema?: string): Promise<any>;
   queryDatabase(sourceId: string, sql: string, parameters: unknown[], maxRows?: number): Promise<any>;
   executeDatabase(sourceId: string, sql: string, parameters: unknown[], operation: "insert" | "update" | "delete"): Promise<any>;
+  startDownload(input: { url: string; dir?: string }): Promise<any>;
+  listDownloads(): Promise<any>;
+  controlDownload(input: { taskId: string; action: "pause" | "resume" | "cancel" }): Promise<void>;
   markModelAgentIncompatible(threadId: string, modelId: string, reason: string): Promise<void>;
   emit(event: RuntimeEvent): Promise<void>;
   log(kind: string, threadId: string, payload: Record<string, unknown>): Promise<void>;
@@ -7238,6 +7241,9 @@ class ThreadSessionRuntime {
                 if (!activeDatabaseConnectionIds.includes(sourceId)) throw new Error(`Database source is unavailable: ${sourceId}`);
                 return this.services.executeDatabase(sourceId, sql, parameters, operation);
               },
+              startDownload: (input) => this.services.startDownload(input),
+              listDownloads: () => this.services.listDownloads(),
+              controlDownload: (input) => this.services.controlDownload(input),
               deferredToolSpecs: mcpTools,
               readOnlyAgent: thread.parentThreadId !== null && this.services.config.multiAgent.childWritePolicy === "read-only",
               hiddenToolNames: [

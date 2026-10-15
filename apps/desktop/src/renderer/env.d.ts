@@ -359,6 +359,12 @@ declare global {
       addDownload: (payload: { url: string; dir?: string }) => Promise<import("@shared-types").DownloadTask>;
       pauseDownload: (id: string) => Promise<boolean>;
       resumeDownload: (id: string) => Promise<boolean>;
+      selectDownloadFiles: (id: string, indexes: number[]) => Promise<import("@shared-types").DownloadTask>;
+      controlDownloadFile: (
+        id: string,
+        index: number,
+        action: "pause" | "resume" | "remove"
+      ) => Promise<import("@shared-types").DownloadTask>;
       cancelDownload: (id: string) => Promise<void>;
       removeDownloadHistory: (id: string) => Promise<void>;
       deleteDownloadFile: (filePath: string) => Promise<string>;

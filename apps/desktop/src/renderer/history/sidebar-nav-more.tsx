@@ -17,6 +17,8 @@ export const SIDEBAR_NAV_ITEM_ICONS: Record<SidebarNavItemId, ReactNode> = {
 type SidebarNavMoreProps = {
   items: SidebarNavItemId[];
   activeItemId: SidebarNavItemId | null;
+  /** 入口右侧的可选数量（如「下载」的进行中任务数），0/缺省不渲染徽标。 */
+  itemCounts?: Partial<Record<SidebarNavItemId, number>>;
   onSelect: (id: SidebarNavItemId) => void;
 };
 
@@ -27,7 +29,7 @@ type SidebarNavMoreProps = {
  * marks it only while one of the hidden entries owns the open panel. The flyout
  * is portaled to the body so the scrolling rail cannot clip it.
  */
-export function SidebarNavMore({ items, activeItemId, onSelect }: SidebarNavMoreProps) {
+export function SidebarNavMore({ items, activeItemId, itemCounts, onSelect }: SidebarNavMoreProps) {
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number | null>(null);
@@ -106,6 +108,7 @@ export function SidebarNavMore({ items, activeItemId, onSelect }: SidebarNavMore
                   <span className="gpa-popover-item-copy">
                     <span className="gpa-popover-item-title">{SIDEBAR_NAV_ITEM_LABELS[id]}</span>
                   </span>
+                  {(itemCounts?.[id] ?? 0) > 0 ? <span className="sidebar-nav-more-item-count" aria-label={`${SIDEBAR_NAV_ITEM_LABELS[id]} ${itemCounts?.[id]}`}>{itemCounts?.[id]}</span> : null}
                 </button>
               ))}
             </div>,

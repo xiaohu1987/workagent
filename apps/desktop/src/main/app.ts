@@ -106,6 +106,7 @@ import { buildSubagentCompletionSummary } from "./subagent-summary";
 import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime, type TerminalOutputHeartbeat } from "./terminal-runtime";
 import { GitService } from "./git-service";
+import type { DownloadService } from "./download-service";
 import { SkillLabService } from "./skill-lab";
 import {
   MemoryDistillerService,
@@ -325,6 +326,8 @@ export class DesktopBackend {
   readonly #browserConsoleErrors = new Map<string, Array<{ message: string; sourceId?: string; line?: number }>>();
   readonly #browserDebuggerOwned = new Set<string>();
   readonly #skillLabEvents = new EventEmitter();
+  // 下载管理器由 main/index.ts 在窗口创建阶段注入（晚于本类构造），chat 工具经此桥接。
+  #downloads: DownloadService | null = null;
 
   #layout!: HomeLayout;
   #db!: DatabaseService;
@@ -568,6 +571,18 @@ export class DesktopBackend {
       describeDatabaseSchema: async (sourceId, schema) => this.describeDatabaseSchema(sourceId, schema),
       queryDatabase: async (sourceId, sql, parameters, maxRows) => this.queryDatabase(sourceId, sql, parameters, maxRows),
       executeDatabase: async (sourceId, sql, parameters, operation) => this.executeDatabase(sourceId, sql, parameters, operation),
+      startDownload: async (input) => this.#requireDownloadService().add(input),
+      listDownloads: async () => this.#requireDownloadService().getSnapshot(),
+      controlDownload: async (input) => {
+        const downloads = this.#requireDownloadService();
+        if (input.action === "pause") {
+          downloads.pause(input.taskId);
+        } else if (input.action === "resume") {
+          downloads.resume(input.taskId);
+        } else {
+          await downloads.cancel(input.taskId);
+        }
+      },
       markModelAgentIncompatible: async (threadId, modelId, reason) =>
         this.markModelAgentIncompatible(threadId, modelId, reason),
       emit: async (event) => this.emit(event),
@@ -2238,6 +2253,18 @@ export class DesktopBackend {
     }
     await this.#logs.append("config.download_dir_updated", { downloadDir: normalized });
     return normalized;
+  }
+
+  /** main/index.ts 创建 DownloadService 后注入，供 chat 的 download.* 工具桥接。 */
+  public attachDownloadService(service: DownloadService): void {
+    this.#downloads = service;
+  }
+
+  #requireDownloadService(): DownloadService {
+    if (!this.#downloads) {
+      throw new Error("下载服务尚未就绪，请稍后重试。");
+    }
+    return this.#downloads;
   }
 
   public async setLiveEditPreviewEnabled(enabled: boolean): Promise<boolean> {
