@@ -547,7 +547,7 @@ function DocumentEditor({ tab, onChange, onSave, onSaveAs }: DocumentEditorProps
             />
           ) : null}
           <textarea
-            className="document-editor-input"
+            className={`document-editor-input ${highlightEnabled ? "" : "document-editor-input-plain"}`}
             ref={inputRef}
             value={tab.content}
             aria-label={`${tab.title} 源码`}

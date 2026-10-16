@@ -206,7 +206,7 @@ describe("查看文档：侧栏入口 + 聊天区内联面板", () => {
     expect(panel).toContain("isDocumentDirty(tab.content, tab.savedContent)");
     expect(panel).toContain('className="document-editor-gutter"');
     expect(panel).toContain('className="document-editor-highlight"');
-    expect(panel).toContain('className="document-editor-input"');
+    expect(panel).toContain('className={`document-editor-input ${highlightEnabled ? "" : "document-editor-input-plain"}`}');
     expect(panel).toContain("Ctrl+S");
     expect(panel).toContain("另存为（Ctrl+Shift+S）");
   });
