@@ -307,7 +307,7 @@ function wrapSql(sql: string, engine: DatabaseConnectionConfig["engine"], limit:
 
 async function runPostgres(connection: DatabaseConnectionConfig, password: string, sql: string, parameters: unknown[], limit: number, timeoutMs: number, enforceRowLimit: boolean): Promise<DatabaseRows> {
   const { Client }: any = await loadDriver("pg");
-  const client = new Client({ host: connection.host, port: connection.port, database: connection.database, user: connection.username, password, ssl: tls(connection), connectionTimeoutMillis: timeoutMs, query_timeout: timeoutMs });
+  const client = new Client({ host: connection.host, port: connection.port, database: connection.database || "postgres", user: connection.username, password, ssl: tls(connection), connectionTimeoutMillis: timeoutMs, query_timeout: timeoutMs });
   await client.connect(); try { return (await client.query({ text: wrapSql(sql, connection.engine, limit, enforceRowLimit), values: parameters })).rows; } finally { await client.end(); }
 }
 
@@ -325,7 +325,7 @@ async function runMysql(connection: DatabaseConnectionConfig, password: string, 
   const connectionPromise = mysql.createConnection({
     host: connection.host,
     port: connection.port,
-    database: connection.database,
+    database: connection.database || undefined,
     user: connection.username,
     password,
     ssl: tls(connection) || undefined,
@@ -384,7 +384,7 @@ async function runSqlServer(connection: DatabaseConnectionConfig, password: stri
     throw annotateDatabaseError(error, "driver_load");
   }
   return new Promise((resolve, reject) => {
-    const client = new tedious.Connection({ server: connection.host, authentication: { type: "default", options: { userName: connection.username, password } }, options: { port: connection.port, database: connection.database, encrypt: connection.tlsMode !== "disable", trustServerCertificate: connection.tlsMode !== "verify", connectTimeout: timeoutMs, requestTimeout: timeoutMs } });
+    const client = new tedious.Connection({ server: connection.host, authentication: { type: "default", options: { userName: connection.username, password } }, options: { port: connection.port, database: connection.database || undefined, encrypt: connection.tlsMode !== "disable", trustServerCertificate: connection.tlsMode !== "verify", connectTimeout: timeoutMs, requestTimeout: timeoutMs } });
     const rows: DatabaseRows = [];
     let settled = false;
     let stage: DatabaseOperationStage = "connect";
