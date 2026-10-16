@@ -343,8 +343,18 @@ export function DateInput(props: BaseControlProps & {
   );
 }
 
+const TIME_HOURS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
+const TIME_MINUTES = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, "0"));
+
+function splitTimeValue(value: string): { hour: string; minute: string } {
+  const match = /^(\d{1,2}):(\d{1,2})/.exec((value ?? "").trim());
+  if (!match) return { hour: "", minute: "" };
+  return { hour: match[1].padStart(2, "0"), minute: match[2].padStart(2, "0") };
+}
+
 export function TimeInput(props: BaseControlProps & {
   value: string;
+  /** 兼容保留：原生 time 的边界语义由上层自行校验，双下拉不再透传。 */
   min?: string;
   max?: string;
   step?: number;
@@ -352,21 +362,41 @@ export function TimeInput(props: BaseControlProps & {
 }) {
   const autoId = useId();
   const controlId = props.id ?? autoId;
+  const parts = splitTimeValue(props.value);
+  const hour = parts.hour || "";
+  const minute = parts.minute || "";
+  const change = (nextHour: string, nextMinute: string) => {
+    props.onChange(`${nextHour || "00"}:${nextMinute || "00"}`);
+  };
   return (
     <Field {...props} controlId={controlId}>
-      <input
-        id={controlId}
-        className="fc-control"
-        type="time"
-        value={props.value}
-        min={props.min}
-        max={props.max}
-        step={props.step}
-        disabled={props.disabled}
-        aria-invalid={props.error ? true : undefined}
-        aria-describedby={describedBy(controlId, props)}
-        onChange={(event) => props.onChange(event.target.value)}
-      />
+      <div className="fc-time" id={controlId}>
+        <select
+          className="fc-control"
+          value={hour}
+          disabled={props.disabled}
+          aria-label={`${props.label} · 小时`}
+          onChange={(event) => change(event.target.value, minute)}
+        >
+          {hour === "" ? <option value="" hidden>时</option> : null}
+          {TIME_HOURS.map((item) => (
+            <option key={item} value={item}>{item}</option>
+          ))}
+        </select>
+        <span className="fc-time-sep" aria-hidden="true">:</span>
+        <select
+          className="fc-control"
+          value={minute}
+          disabled={props.disabled}
+          aria-label={`${props.label} · 分钟`}
+          onChange={(event) => change(hour, event.target.value)}
+        >
+          {minute === "" ? <option value="" hidden>分</option> : null}
+          {TIME_MINUTES.map((item) => (
+            <option key={item} value={item}>{item}</option>
+          ))}
+        </select>
+      </div>
     </Field>
   );
 }

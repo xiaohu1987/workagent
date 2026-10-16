@@ -1,0 +1,806 @@
+/* ---------------------------------------------------------------------------
+   定时任务小工具：复用 quick-notes-inline 接管骨架，这里只写作用域内的样式。
+--------------------------------------------------------------------------- */
+
+.scheduler-inline {
+  --scheduler-border: rgba(255, 255, 255, 0.08);
+  --scheduler-card: rgba(255, 255, 255, 0.035);
+  --scheduler-card-hover: rgba(255, 255, 255, 0.06);
+  /* 跟随系统主操作蓝（发送/确定等 primary 按钮同一套变量）。 */
+  --scheduler-accent: var(--action-primary, #2196f3);
+  --scheduler-accent-hover: var(--action-primary-hover, #1687dc);
+  --scheduler-danger: #ff5c5c;
+}
+
+/* 面板标题即双 Tab（定时任务 / 运行记录），样式参考 git-branch-tabs。 */
+.scheduler-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.scheduler-title button {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim, #8b929e);
+  font: inherit;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.scheduler-title button.is-active {
+  color: var(--text-soft, #eceff3);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.scheduler-header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scheduler-ghost-button {
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.14));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-soft, #d5dae2);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.scheduler-ghost-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.scheduler-ghost-button.is-active {
+  border-color: var(--scheduler-accent);
+  color: var(--scheduler-accent);
+  background: transparent;
+}
+
+.scheduler-primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--scheduler-accent);
+  background: var(--scheduler-accent);
+  color: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background var(--motion-fast, 120ms) ease, border-color var(--motion-fast, 120ms) ease;
+}
+
+.scheduler-primary-button:hover:not(:disabled) {
+  border-color: var(--scheduler-accent-hover);
+  background: var(--scheduler-accent-hover);
+}
+
+.scheduler-primary-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.scheduler-top-error {
+  margin: 8px 18px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 92, 92, 0.45);
+  border-radius: 8px;
+  color: #ff7b7b;
+  font-size: 12px;
+  background: rgba(255, 92, 92, 0.1);
+}
+
+.scheduler-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 18px 16px;
+  gap: 12px;
+  overflow: hidden;
+}
+
+/* ---- 任务 Tab ---------------------------------------------------------- */
+
+.scheduler-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.scheduler-chip {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim, #8b929e);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.scheduler-chip.is-active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-soft, #eceff3);
+}
+
+.scheduler-batch-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--scheduler-accent) 35%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--scheduler-accent) 8%, transparent);
+  font-size: 12px;
+  color: var(--text-soft, #d5dae2);
+}
+
+.scheduler-batch-bar button {
+  border: 1px solid var(--scheduler-border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.scheduler-batch-bar button.is-danger {
+  border-color: rgba(255, 92, 92, 0.5);
+  color: var(--scheduler-danger);
+}
+
+.scheduler-task-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  align-content: start;
+  padding-right: 4px;
+}
+
+.scheduler-empty {
+  grid-column: 1 / -1;
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-dim, #8b929e);
+  font-size: 13px;
+}
+
+.scheduler-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--scheduler-border);
+  border-radius: 12px;
+  background: var(--scheduler-card);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.scheduler-card:hover {
+  background: var(--scheduler-card-hover);
+}
+
+.scheduler-card.is-selected {
+  border-color: color-mix(in srgb, var(--scheduler-accent) 60%, transparent);
+}
+
+.scheduler-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scheduler-card-head h3 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft, #eceff3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 批量模式的方形勾选框（复用开关的圆形轨道会误导，另画）。 */
+.scheduler-check {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  border: 1px solid var(--scheduler-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+}
+
+.scheduler-check.is-on {
+  background: var(--scheduler-accent);
+  border-color: var(--scheduler-accent);
+}
+
+.scheduler-check svg {
+  width: 11px;
+  height: 11px;
+}
+
+/* 卡片开关状态配色：启用 = 绿底白钮，暂停 = 红底白钮（只作用于本面板）。 */
+.scheduler-card .fc-switch .fc-switch-knob {
+  background: #ffffff;
+}
+
+.scheduler-card .fc-switch.is-on {
+  border-color: #2ecc71;
+  background: #2ecc71;
+}
+
+.scheduler-card .fc-switch:not(.is-on) {
+  border-color: var(--scheduler-danger);
+  background: var(--scheduler-danger);
+}
+
+.scheduler-card-prompt {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim, #a7aeb8);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: calc(1.6em * 3);
+}
+
+.scheduler-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim, #8b929e);
+}
+
+.scheduler-card-schedule {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduler-card-schedule svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.scheduler-card-cwd {
+  flex: 0 0 auto;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--scheduler-accent) 40%, transparent);
+  border-radius: 999px;
+  color: var(--scheduler-accent);
+  font-size: 11px;
+}
+
+.scheduler-card-test {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim, #8b929e);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.scheduler-card-test:hover {
+  color: var(--scheduler-accent);
+}
+
+.scheduler-card-next {
+  flex: 0 0 auto;
+  color: var(--text-soft, #c3c9d2);
+}
+
+/* ---- 运行记录 Tab ------------------------------------------------------ */
+
+.scheduler-runs-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scheduler-search {
+  flex: 0 0 280px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--scheduler-border);
+  border-radius: 9px;
+  background: rgba(13, 14, 17, 0.55);
+  color: var(--text-dim, #8b929e);
+}
+
+.scheduler-search svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.scheduler-search input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+  color: var(--text-soft, #eceff3);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+/* 全局 input:focus 的橙色光环（styles.css 4401）与外部输入框同特异性，必须显式压回。 */
+.scheduler-search input:focus,
+.scheduler-search input:focus-visible {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+}
+
+.scheduler-search input::placeholder {
+  color: var(--text-faint, #8b929e);
+}
+
+.scheduler-search:focus-within {
+  border-color: color-mix(in srgb, var(--scheduler-accent) 55%, transparent);
+}
+
+.scheduler-select {
+  flex: 0 0 auto;
+  /* 全局 select reset 是 width: 100%（styles.css 168），不压回会被撑满剩余空间。 */
+  width: auto;
+  height: 32px;
+  border: 1px solid var(--scheduler-border);
+  border-radius: 9px;
+  background: rgba(13, 14, 17, 0.55);
+  color: var(--text-soft, #d5dae2);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.scheduler-select option {
+  background: #17191d;
+  color: #eceff3;
+}
+
+.scheduler-runs-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding-right: 4px;
+}
+
+.scheduler-runs-head,
+.scheduler-runs-row {
+  display: grid;
+  /* minmax(0, fr)：窄窗口时各列按比例收缩，绝不把操作列挤出可视区。 */
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 0.55fr) minmax(0, 0.5fr) minmax(0, 0.55fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px 12px;
+  font-size: 12px;
+}
+
+.scheduler-runs-head > span,
+.scheduler-runs-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduler-runs-head {
+  flex: 0 0 auto;
+  color: var(--text-dim, #8b929e);
+  border-bottom: 1px solid var(--scheduler-border);
+  padding-top: 6px;
+  padding-bottom: 8px;
+}
+
+.scheduler-runs-row {
+  border-bottom: none;
+  border-radius: 9px;
+  margin: 2px 0;
+  color: var(--text-soft, #c3c9d2);
+  transition: background 120ms ease;
+}
+
+.scheduler-runs-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.scheduler-runs-row:last-child {
+  margin-bottom: 0;
+}
+
+.scheduler-runs-row .scheduler-run-name {
+  font-weight: 500;
+  color: var(--text-soft, #eceff3);
+}
+
+.scheduler-run-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduler-run-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scheduler-run-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.scheduler-run-status.is-ok {
+  color: var(--scheduler-accent);
+}
+
+.scheduler-run-status.is-bad {
+  color: var(--scheduler-danger);
+}
+
+.scheduler-run-status.is-busy {
+  color: #e8b34b;
+}
+
+.scheduler-run-time {
+  color: var(--text-dim, #8b929e);
+}
+
+.scheduler-run-actions {
+  display: inline-flex;
+  align-items: center;
+  /* 左对齐：按钮落在「操作」表头文字正下方，不飘到列最右端。 */
+  justify-content: flex-start;
+  gap: 6px;
+  align-self: center;
+  height: 100%;
+}
+
+.scheduler-run-actions button {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim, #8b929e);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 6px;
+  display: inline-flex;
+}
+
+.scheduler-run-actions button:hover {
+  color: var(--text-soft, #eceff3);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.scheduler-run-actions svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- 新建/编辑对话框 --------------------------------------------------- */
+
+.scheduler-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 240;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+.scheduler-dialog {
+  width: min(680px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--scheduler-border);
+  border-radius: 14px;
+  background: #17191d;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.scheduler-dialog-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 10px;
+}
+
+.scheduler-dialog-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-soft, #eceff3);
+}
+
+/* 表单区：复用全局 fc-field/fc-control 组件，这里只管布局与作用域微调。 */
+.scheduler-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 18px 12px;
+}
+
+.scheduler-dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.scheduler-dialog-grid .fc-field {
+  min-width: 0;
+}
+
+.scheduler-dialog-body .fc-select option,
+.scheduler-dialog-body select option {
+  background: #17191d;
+  color: #eceff3;
+}
+
+.scheduler-dialog-body input[type="date"],
+.scheduler-dialog-body input[type="time"] {
+  color-scheme: dark;
+}
+
+.scheduler-dialog-error {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 92, 92, 0.45);
+  border-radius: 8px;
+  color: #ff7b7b;
+  font-size: 12px;
+  background: rgba(255, 92, 92, 0.1);
+}
+
+/* 提示词 + 工作空间：composer 同款结构——选择工作空间的小胶囊嵌在
+   提示词输入框内部左下角，弹层从输入框下方向下展开。 */
+.scheduler-prompt-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  transition: border-color var(--motion-fast, 120ms) ease;
+}
+
+.scheduler-prompt-shell:focus-within {
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+:root[data-theme="light"] .scheduler-prompt-shell {
+  border-color: rgba(15, 32, 48, 0.18);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+:root[data-theme="light"] .scheduler-prompt-shell:focus-within {
+  border-color: rgba(33, 150, 243, 0.55);
+}
+
+.scheduler-prompt-input {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  min-height: 130px;
+  resize: vertical;
+}
+
+.scheduler-prompt-input:focus {
+  border: none;
+  box-shadow: none;
+}
+
+.scheduler-prompt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 8px;
+  min-height: 36px;
+}
+
+.scheduler-prompt-toolbar .composer-status-trigger {
+  height: 30px;
+  max-width: 60%;
+}
+
+/* 内嵌「选择执行的模型」：composer 模型选择器同款组件，缩到工具栏尺寸。 */
+.scheduler-prompt-toolbar .composer-model-picker {
+  flex: 0 0 auto;
+  margin-left: auto;
+  max-width: 55%;
+}
+
+.scheduler-prompt-toolbar .composer-model-picker-trigger {
+  height: 30px;
+  min-height: 30px;
+  border-radius: 999px;
+  gap: 6px;
+  padding: 0 10px;
+}
+
+.scheduler-prompt-toolbar .composer-model-picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 内嵌「推理强度」：composer 同款组件，与模型胶囊同排同高。 */
+.scheduler-prompt-toolbar .reasoning-effort-trigger {
+  height: 30px;
+  min-height: 30px;
+  border-radius: 999px;
+  gap: 6px;
+}
+
+.scheduler-prompt-cwd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint, #8b929e);
+  font-size: 11px;
+}
+
+.scheduler-workspace-menu.composer-status-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
+  /* 与提示词框同宽，内容一行放下。 */
+  width: 100%;
+  max-height: min(320px, calc(100vh - 220px));
+  overflow: hidden auto;
+  z-index: 5;
+}
+
+.scheduler-workspace-menu .composer-status-option-main {
+  align-items: baseline;
+}
+
+.scheduler-workspace-menu .composer-status-option-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+}
+
+.scheduler-dialog-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 16px;
+}
+
+.scheduler-dialog-foot-spacer {
+  flex: 1 1 auto;
+}
+
+.scheduler-dialog-remove {
+  border: 1px solid rgba(255, 92, 92, 0.5);
+  background: transparent;
+  color: var(--scheduler-danger);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* ---- 接管聊天区 + 动效 + 浅色主题 -------------------------------------- */
+/* 背景保持透明（与查看文档一致）：应用壁纸直接从面板后面透出来。 */
+.chat-canvas.is-scheduler {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-canvas.is-scheduler > .chat-scroll,
+.chat-canvas.is-scheduler > footer {
+  display: none !important;
+}
+
+.scheduler-inline[data-motion="entering"] {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.scheduler-inline[data-motion="entered"] {
+  opacity: 1;
+  transform: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.scheduler-inline[data-motion="exiting"] {
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+:root[data-theme="light"] .scheduler-inline {
+  --scheduler-border: rgba(15, 32, 48, 0.14);
+  --scheduler-card: rgba(255, 255, 255, 0.72);
+  --scheduler-card-hover: rgba(226, 238, 248, 0.95);
+  --scheduler-danger: #c04545;
+}
+
+:root[data-theme="light"] .scheduler-dialog {
+  background: #fbfdff;
+}
+
+:root[data-theme="light"] .scheduler-runs-row:hover {
+  background: rgba(15, 32, 48, 0.05);
+}
+
+:root[data-theme="light"] .scheduler-search,
+:root[data-theme="light"] .scheduler-select {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(15, 32, 48, 0.18);
+}
+
+:root[data-theme="light"] .scheduler-select:hover {
+  border-color: rgba(15, 32, 48, 0.32);
+}
+
+:root[data-theme="light"] .scheduler-dialog-body .fc-select option,
+:root[data-theme="light"] .scheduler-dialog-body select option {
+  background: #fff;
+  color: #1f2937;
+}

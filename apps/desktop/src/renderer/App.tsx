@@ -29,6 +29,7 @@ import type {
   SubagentResultEnvelope,
   RuntimeThreadSnapshotCursor,
   RuntimeThreadSnapshot,
+  SchedulerStatePayload,
   SkillMetadata,
   SkillUsageStats,
   ThreadRecord,
@@ -218,6 +219,7 @@ import {
 import { TokenUsagePopover } from "./workspace/token-usage-popover";
 import { DocumentViewerPanel } from "./workspace/document-viewer-panel";
 import { DownloadsPanel } from "./workspace/downloads-panel";
+import { SchedulerPanel } from "./workspace/scheduler-panel";
 import { ApiCardFavoritesPanel } from "./workspace/api-card-favorites";
 import {
   subscribeApiCardFavoriteNotices,
@@ -887,6 +889,24 @@ export function App() {
   // 下载小工具：任务快照挂在这层而不是面板内部，入口点开时直接用最新状态渲染。
   const [isDownloadsPanelOpen, setIsDownloadsPanelOpen] = useState(false);
   const [downloadsSnapshot, setDownloadsSnapshot] = useState<DownloadServiceSnapshot>({ tasks: [], history: [], defaultDir: "", p2pAvailable: false });
+  // 定时任务小工具：面板自己拉取并订阅主进程推送的快照，这里只管开合。
+  const [isSchedulerPanelOpen, setIsSchedulerPanelOpen] = useState(false);
+  // 定时任务生成的会话 id 集合：历史列表里给这些会话加小徽标（任务固定线程 + 运行记录并集）。
+  const [schedulerThreadIds, setSchedulerThreadIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const absorb = (state: SchedulerStatePayload) => {
+      const ids = new Set<string>();
+      for (const task of state.tasks) {
+        if (task.threadId) ids.add(task.threadId);
+      }
+      for (const run of state.runs) {
+        if (run.threadId) ids.add(run.threadId);
+      }
+      setSchedulerThreadIds(ids);
+    };
+    void window.codexh.getSchedulerState().then(absorb).catch(() => undefined);
+    return window.codexh.onSchedulerState(absorb);
+  }, []);
   useEffect(() => {
     const dispose = window.codexh.onDownloadState((snapshot) => setDownloadsSnapshot(snapshot));
     void window.codexh.getDownloadState().then((snapshot) => setDownloadsSnapshot(snapshot)).catch(() => undefined);
@@ -1377,6 +1397,7 @@ export function App() {
   const [historyThreadDeleteConfirmation, setHistoryThreadDeleteConfirmation] = useState<ThreadRecord | null>(null);
   const [historyBatchDeleteConfirmation, setHistoryBatchDeleteConfirmation] = useState<string[] | null>(null);
   const [deletingHistoryBatch, setDeletingHistoryBatch] = useState(false);
+  const [historyBatchDeleteProgress, setHistoryBatchDeleteProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [deletingQueuedMessageId, setDeletingQueuedMessageId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -3444,6 +3465,11 @@ export function App() {
           return;
         }
 
+        if (isSchedulerPanelOpen) {
+          setIsSchedulerPanelOpen(false);
+          return;
+        }
+
         if (isSharing && shareBusyChannel === null && !shareGenerating) {
           setIsSharing(false);
           return;
@@ -5409,6 +5435,7 @@ export function App() {
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
     setIsDownloadsPanelOpen(false);
+    setIsSchedulerPanelOpen(false);
     selectThreadId(thread.id);
     seedOptimisticThreadSnapshot(thread);
     // The composer is usable from the optimistic state. Fetch everything else
@@ -5423,6 +5450,7 @@ export function App() {
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
     setIsDownloadsPanelOpen(false);
+    setIsSchedulerPanelOpen(false);
     const isSwitchingThread = selectedThreadIdRef.current !== threadId;
     if (options?.scrollToLatest) {
       cancelPendingAutoScrollFrame();
@@ -5464,25 +5492,31 @@ export function App() {
   }
 
   async function softRestoreSameSessionGpaPlan(threadId: string): Promise<void> {
-    const plan = (await window.codexh.getProjectGpaPlan(threadId)) as GpaPlanResumePreview | null;
-    if (!plan?.sameSession || selectedThreadIdRef.current !== threadId) {
-      return;
-    }
-    const snapshotGpa = (await window.codexh.getGpaState(threadId)) as GpaState;
-    if (selectedThreadIdRef.current !== threadId) {
-      return;
-    }
-    if (snapshotGpa.stage !== "off" && snapshotGpa.planTasks.length > 0) {
+    // 会话可能已被删除（如运行记录里指向旧线程）：GPA 恢复是尽力而为，
+    // 任何 IPC 失败都不能打断打开会话的流程。
+    try {
+      const plan = (await window.codexh.getProjectGpaPlan(threadId)) as GpaPlanResumePreview | null;
+      if (!plan?.sameSession || selectedThreadIdRef.current !== threadId) {
+        return;
+      }
+      const snapshotGpa = (await window.codexh.getGpaState(threadId)) as GpaState;
+      if (selectedThreadIdRef.current !== threadId) {
+        return;
+      }
+      if (snapshotGpa.stage !== "off" && snapshotGpa.planTasks.length > 0) {
+        setGpaComposerSelected(true);
+        return;
+      }
+      const restored = (await window.codexh.restoreProjectGpaPlan(threadId)) as GpaState;
+      if (selectedThreadIdRef.current !== threadId) {
+        return;
+      }
+      setGpaState(restored);
       setGpaComposerSelected(true);
-      return;
+      await refreshSnapshot(threadId);
+    } catch {
+      // ignore：线程不存在或恢复失败都静默跳过。
     }
-    const restored = (await window.codexh.restoreProjectGpaPlan(threadId)) as GpaState;
-    if (selectedThreadIdRef.current !== threadId) {
-      return;
-    }
-    setGpaState(restored);
-    setGpaComposerSelected(true);
-    await refreshSnapshot(threadId);
   }
 
   async function resumeGpaPlanExecution(threadId: string, plan: GpaPlanResumePreview) {
@@ -5617,6 +5651,7 @@ export function App() {
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
     setIsDownloadsPanelOpen(false);
+    setIsSchedulerPanelOpen(false);
     if (selectedThreadId) selectThreadId(null);
     setInput("");
     setIsNewTaskComposerOpen(true);
@@ -5954,21 +5989,32 @@ export function App() {
   async function confirmBatchDeleteHistoryThreads() {
     const threadIds = historyBatchDeleteConfirmation;
     if (!threadIds || deletingHistoryBatch) return;
+    // 逐个删除并上报进度，避免一次大 IPC 期间界面长时间无反馈。
+    const uniqueIds = [...new Set(threadIds)];
     setDeletingHistoryBatch(true);
+    setHistoryBatchDeleteProgress({ done: 0, total: uniqueIds.length, failed: 0 });
+    const deleted: string[] = [];
+    const failed: Array<{ threadId: string; reason: string }> = [];
     try {
-      const selectedId = selectedThreadIdRef.current;
-      const result = await window.codexh.deleteThreads(threadIds);
-      for (const threadId of result.deleted) {
-        snapshotCacheByThreadRef.current.delete(threadId);
-        delete snapshotCursorByThreadRef.current[threadId];
-        delete latestRuntimeThreadsRef.current[threadId];
-        delete persistedRuntimeMessagesRef.current[threadId];
+      for (const [index, threadId] of uniqueIds.entries()) {
+        try {
+          await window.codexh.deleteThread(threadId);
+          snapshotCacheByThreadRef.current.delete(threadId);
+          delete snapshotCursorByThreadRef.current[threadId];
+          delete latestRuntimeThreadsRef.current[threadId];
+          delete persistedRuntimeMessagesRef.current[threadId];
+          deleted.push(threadId);
+        } catch (error) {
+          failed.push({ threadId, reason: error instanceof Error ? error.message : String(error) });
+        }
+        setHistoryBatchDeleteProgress({ done: index + 1, total: uniqueIds.length, failed: failed.length });
       }
       setHistoryBatchDeleteConfirmation(null);
-      if (selectedId && result.deleted.includes(selectedId)) {
+      const selectedId = selectedThreadIdRef.current;
+      if (selectedId && deleted.includes(selectedId)) {
         const deletedWorkspaceCwd = pickProjectWorkspaceCwd([
           threadsRef.current.find((entry) => entry.id === selectedId),
-          ...result.deleted.map((threadId) => threadsRef.current.find((entry) => entry.id === threadId))
+          ...deleted.map((threadId) => threadsRef.current.find((entry) => entry.id === threadId))
         ]);
         selectThreadId(null);
         setSnapshot(null);
@@ -5977,15 +6023,16 @@ export function App() {
       } else {
         await refreshThreads({ fallbackToFirst: false });
       }
-      if (result.failed.length > 0) {
-        showNotice(`已删除 ${result.deleted.length} 个任务，${result.failed.length} 个任务失败。`, { message: result.failed.map((entry) => getThreadDeleteFailureMessage(entry.reason)).join("；") });
+      if (failed.length > 0) {
+        showNotice(`已删除 ${deleted.length} 个任务，${failed.length} 个任务失败。`, { message: failed.map((entry) => getThreadDeleteFailureMessage(entry.reason)).join("；") });
       } else {
-        showNotice(`已删除 ${result.deleted.length} 个历史任务。`, { tone: "success" });
+        showNotice(`已删除 ${deleted.length} 个历史任务。`, { tone: "success" });
       }
     } catch (error) {
       showNotice("暂时无法批量删除任务。", { message: getThreadDeleteFailureMessage(error) });
     } finally {
       setDeletingHistoryBatch(false);
+      setHistoryBatchDeleteProgress(null);
     }
   }
 
@@ -7476,6 +7523,7 @@ export function App() {
   const apiFavoritesPresence = useMotionPresence(isApiFavoritesOpen ? true : null, 220);
   const documentViewerPresence = useMotionPresence(isDocumentViewerOpen ? true : null, 220);
   const downloadsPanelPresence = useMotionPresence(isDownloadsPanelOpen ? true : null, 220);
+  const schedulerPanelPresence = useMotionPresence(isSchedulerPanelOpen ? true : null, 220);
   // Sharing reads the same transcript the user sees, so a shared message always
   // matches the rendered answer (tool event blocks are excluded) and the tick
   // boxes line up with the conversation on screen.
@@ -7640,6 +7688,7 @@ export function App() {
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
     setIsDownloadsPanelOpen(false);
+    setIsSchedulerPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     return openQuickNotes();
@@ -7653,6 +7702,7 @@ export function App() {
     setIsQuickNotesOpen(false);
     setIsDocumentViewerOpen(false);
     setIsDownloadsPanelOpen(false);
+    setIsSchedulerPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     setIsApiFavoritesOpen(true);
@@ -7666,6 +7716,7 @@ export function App() {
     setIsQuickNotesOpen(false);
     setIsApiFavoritesOpen(false);
     setIsDownloadsPanelOpen(false);
+    setIsSchedulerPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     setIsDocumentViewerOpen(true);
@@ -7679,9 +7730,24 @@ export function App() {
     setIsQuickNotesOpen(false);
     setIsApiFavoritesOpen(false);
     setIsDocumentViewerOpen(false);
+    setIsSchedulerPanelOpen(false);
     if (isSharing) exitShareMode();
     if (isTerminalOpen) setIsTerminalOpen(false);
     setIsDownloadsPanelOpen(true);
+  });
+  // 定时任务入口排在下载下方，同样接管聊天区，与其他小工具面板互斥显示。
+  const openSchedulerPanelEvent = useStableEvent(() => {
+    if (isSchedulerPanelOpen) {
+      setIsSchedulerPanelOpen(false);
+      return;
+    }
+    setIsQuickNotesOpen(false);
+    setIsApiFavoritesOpen(false);
+    setIsDocumentViewerOpen(false);
+    setIsDownloadsPanelOpen(false);
+    if (isSharing) exitShareMode();
+    if (isTerminalOpen) setIsTerminalOpen(false);
+    setIsSchedulerPanelOpen(true);
   });
   const openHistorySearchEvent = useStableEvent(openHistorySearch);
   const openSettingsEvent = useStableEvent((tab: SettingsTab) => {
@@ -7838,6 +7904,9 @@ export function App() {
         onOpenDownloads={openDownloadsPanelEvent}
         downloadsActive={isDownloadsPanelOpen}
         downloadsActiveCount={activeDownloadCount}
+        onOpenScheduler={openSchedulerPanelEvent}
+        schedulerActive={isSchedulerPanelOpen}
+        schedulerThreadIds={schedulerThreadIds}
         documentViewerOpenCount={documentTabs.tabs.length}
         hiddenSidebarItems={config?.desktop.hiddenSidebarItems}
         onOpenSearch={openHistorySearchEvent}
@@ -7886,7 +7955,7 @@ export function App() {
             onTerminalVideoEnd={() => realtimeEnhancement.returnToIdle(realtimeEnhancement.scene.turnRunId)}
           />
         ) : null}
-        {isQuickNotesOpen || isApiFavoritesOpen || isDocumentViewerOpen || isDownloadsPanelOpen ? null : <WorkspaceControls
+        {isQuickNotesOpen || isApiFavoritesOpen || isDocumentViewerOpen || isDownloadsPanelOpen || isSchedulerPanelOpen ? null : <WorkspaceControls
           tokenUsage={threadTokenUsage.thread}
           tokenUsageOpen={isTokenUsagePanelOpen}
           tokenUsageMotionPhase={tokenUsagePanelPresence.value ? tokenUsagePanelPresence.phase : undefined}
@@ -7949,7 +8018,7 @@ export function App() {
           </div>
         ) : null}
 
-        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""} ${isQuickNotesOpen ? "is-quick-notes" : ""} ${isApiFavoritesOpen ? "is-api-favorites" : ""} ${isDocumentViewerOpen ? "is-document-viewer" : ""} ${isDownloadsPanelOpen ? "is-downloads" : ""}`}>
+        <section className={`chat-canvas ${isSharing ? "is-sharing" : ""} ${isNewTaskComposerOpen ? "is-new-task" : ""} ${isQuickNotesOpen ? "is-quick-notes" : ""} ${isApiFavoritesOpen ? "is-api-favorites" : ""} ${isDocumentViewerOpen ? "is-document-viewer" : ""} ${isDownloadsPanelOpen ? "is-downloads" : ""} ${isSchedulerPanelOpen ? "is-scheduler" : ""}`}>
           {quickNotesPresence.value ? (
             <QuickNotesPanel
               motionPhase={quickNotesPresence.phase}
@@ -8006,6 +8075,35 @@ export function App() {
               snapshot={downloadsSnapshot}
               setSnapshot={setDownloadsSnapshot}
               onClose={() => setIsDownloadsPanelOpen(false)}
+            />
+          ) : null}
+          {schedulerPanelPresence.value ? (
+            <SchedulerPanel
+              motionPhase={schedulerPanelPresence.phase}
+              onClose={() => setIsSchedulerPanelOpen(false)}
+              onOpenThread={(threadId) => {
+                // 运行记录可能指向已被删除的旧会话：先校验再打开，给出明确提示。
+                if (!threads.some((item) => item.id === threadId)) {
+                  showNotice("该会话已被删除，无法打开。");
+                  return;
+                }
+                void openThreadEvent(threadId);
+              }}
+              workspaceOptions={collectWorkspaceOptions(projectHistoryGroups.flatMap((group) => group.threads))}
+              modelProviders={composerProviderOptions}
+              modelGroups={composerModelGroups}
+              defaultProviderId={config?.defaultProvider ?? ""}
+              defaultModelId={config?.defaultModel ?? ""}
+              reasoningEffortResolver={(providerId, modelId) => {
+                const model = config?.models.find((entry) => entry.providerId === providerId && entry.id === modelId) ?? null;
+                if (!model) return null;
+                const resolvedDefault = resolveModelReasoningEffort(model, config?.reasoningEffort ?? "medium");
+                return {
+                  configurable: isConfigurableReasoningEffortModel(model),
+                  efforts: model.supportedReasoningEfforts?.filter(isGptReasoningEffort) ?? GPT_REASONING_EFFORTS,
+                  defaultEffort: isGptReasoningEffort(resolvedDefault) ? resolvedDefault : "medium"
+                };
+              }}
             />
           ) : null}
           <div
@@ -8847,11 +8945,35 @@ export function App() {
           titleId="history-batch-delete-confirm-title"
           title="批量删除历史任务"
           description={`确定要永久删除选中的 ${visibleHistoryBatchDeleteConfirmation.length} 个任务吗？消息、执行记录、附件和子任务都将被删除，且无法恢复。`}
-          confirmLabel={deletingHistoryBatch ? "正在删除..." : "确认批量删除"}
+          confirmLabel={
+            deletingHistoryBatch && historyBatchDeleteProgress
+              ? `正在删除 ${historyBatchDeleteProgress.done}/${historyBatchDeleteProgress.total}...`
+              : "确认批量删除"
+          }
           busy={deletingHistoryBatch}
           onClose={() => setHistoryBatchDeleteConfirmation(null)}
           onConfirm={() => void confirmBatchDeleteHistoryThreads()}
-        />
+        >
+          {deletingHistoryBatch && historyBatchDeleteProgress ? (
+            <div
+              className="batch-delete-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={historyBatchDeleteProgress.total}
+              aria-valuenow={historyBatchDeleteProgress.done}
+            >
+              <div className="batch-delete-progress-track">
+                <div
+                  className="batch-delete-progress-fill"
+                  style={{ width: `${Math.round((historyBatchDeleteProgress.done / Math.max(historyBatchDeleteProgress.total, 1)) * 100)}%` }}
+                />
+              </div>
+              <span>
+                {`已删除 ${historyBatchDeleteProgress.done}/${historyBatchDeleteProgress.total} 个任务${historyBatchDeleteProgress.failed > 0 ? `，${historyBatchDeleteProgress.failed} 个失败` : ""}`}
+              </span>
+            </div>
+          ) : null}
+        </ConfirmationSheet>
       ) : null}
 
       {visibleUpdateConfirmDialog ? (

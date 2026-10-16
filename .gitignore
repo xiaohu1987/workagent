@@ -13,6 +13,9 @@ log/
 # Local pnpm store written by test runs that pass --store-dir test-store.
 /test-store/
 
+# Scratch data left behind by an older scheduler test data path.
+/unused-in-memory/
+
 # Incremental compiler caches produced by local type-check runs.
 *.tsbuildinfo
 

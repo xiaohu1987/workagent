@@ -54,6 +54,9 @@ import type {
   RuntimeLogPage,
   RuntimeThreadSnapshotCursor,
   RuntimeThreadSnapshot,
+  SchedulerManageInput,
+  SchedulerRunKind,
+  SchedulerTask,
   SkillLabEvent,
   SkillMetadata,
   SubagentResultEnvelope,
@@ -107,6 +110,7 @@ import { McpCredentialStore, McpOAuthService } from "./mcp-oauth";
 import { TerminalRuntime, type TerminalOutputHeartbeat } from "./terminal-runtime";
 import { GitService } from "./git-service";
 import type { DownloadService } from "./download-service";
+import { SchedulerService } from "./scheduler-service";
 import { SkillLabService } from "./skill-lab";
 import {
   MemoryDistillerService,
@@ -346,6 +350,7 @@ export class DesktopBackend {
   #deferredServices: Promise<void> | null = null;
   #backgroundSkillRefresh: Promise<void> | null = null;
   #cloudNotes: CloudNotesService | null = null;
+  #scheduler: SchedulerService | null = null;
 
   /** 后台静默同步队列：保证同一时刻只有一次同步在飞，避免版本号互相踩踏。 */
   #cloudSyncQueue: Promise<void> = Promise.resolve();
@@ -2258,6 +2263,195 @@ export class DesktopBackend {
   /** main/index.ts 创建 DownloadService 后注入，供 chat 的 download.* 工具桥接。 */
   public attachDownloadService(service: DownloadService): void {
     this.#downloads = service;
+  }
+
+  /**
+   * main/index.ts 创建 SchedulerService 后注入，同时把 scheduler_manage
+   * 注册进 ToolRuntime：工具 handler 直接闭包服务实例，无需改动
+   * ToolRuntimeContext / agent-runtime 的上下文装配。
+   */
+  public attachSchedulerService(service: SchedulerService): void {
+    this.#scheduler = service;
+    this.#toolRuntime.register(
+      {
+        name: "scheduler_manage",
+        description:
+          "Manage scheduled chat tasks (定时任务). List existing tasks; create/update tasks that run a prompt as a normal chat at a fixed time; enable/disable, delete, or trigger a test run. Use action=list first to discover task ids.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["list", "create", "update", "delete", "set_enabled", "run_now"] },
+            id: { type: "string", description: "Target task id; required for update/delete/set_enabled/run_now." },
+            name: { type: "string", description: "Task name (create/update)." },
+            prompt: { type: "string", description: "Prompt delivered as a normal chat message when the task fires (create/update)." },
+            scheduleType: { type: "string", enum: ["once", "daily", "weekly", "monthly"] },
+            time: { type: "string", description: "Local time HH:mm, e.g. 09:30." },
+            weekday: { type: "number", description: "0=Sunday..6=Saturday, for weekly." },
+            monthDay: { type: "number", description: "1-28, for monthly." },
+            runAt: { type: "string", description: "ISO datetime for once tasks, e.g. 2026-10-20T09:30." },
+            cwd: { type: "string", description: "Absolute workspace root path to run the task as a project task; omit or empty for a plain chat task." },
+            validUntil: { type: "string", description: "ISO date the task stays valid until; omit for no expiry." },
+            enabled: { type: "boolean", description: "Enable state for set_enabled; defaults to true on create." }
+          },
+          required: ["action"]
+        },
+        riskLevel: "medium",
+        parallelSafe: false
+      },
+      async (args) => {
+        try {
+          const input = args as unknown as SchedulerManageInput;
+          if (!input || typeof input.action !== "string") {
+            return { ok: false, content: "缺少 action 参数。" };
+          }
+          return await this.#requireScheduler().handleManage(input);
+        } catch (error) {
+          return { ok: false, content: error instanceof Error ? error.message : String(error) };
+        }
+      }
+    );
+  }
+
+  #requireScheduler(): SchedulerService {
+    if (!this.#scheduler) throw new Error("定时任务服务尚未就绪，请稍后重试。");
+    return this.#scheduler;
+  }
+
+  public getSchedulerState() {
+    return this.#requireScheduler().getState();
+  }
+
+  public upsertSchedulerTask(input: Partial<SchedulerTask> & { name?: string; prompt?: string }) {
+    return this.#requireScheduler().upsertTask(input);
+  }
+
+  public deleteSchedulerTask(id: string): void {
+    this.#requireScheduler().deleteTask(id);
+  }
+
+  public setSchedulerTaskEnabled(id: string, enabled: boolean) {
+    return this.#requireScheduler().setEnabled(id, enabled);
+  }
+
+  public runSchedulerTaskNow(id: string): void {
+    this.#requireScheduler().runNow(id);
+  }
+
+  public deleteSchedulerRun(id: string): void {
+    this.#requireScheduler().deleteRun(id);
+  }
+
+  /** 供调度器启动恢复用：查线程当前状态（线程不存在返回 null）。 */
+  public getThreadStatus(threadId: string): string | null {
+    try {
+      return this.#db.getThread(threadId)?.status ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 定时任务的实际执行体：按普通聊天形式跑——新建独立线程，把任务提示词
+   * 作为用户消息投递（完整工具链 + 流式），然后轮询线程状态直到本轮对话
+   * 结束，把结果/耗时交回调度器写进运行记录。
+   */
+  public async runScheduledChatTask(task: SchedulerTask, _kind: SchedulerRunKind): Promise<{ threadId: string; ok: boolean; error?: string }> {
+    // 同一任务固定复用同一个会话：任务记录里有 threadId 且线程还在就续聊；
+    // 否则（首次执行/会话被删）新建并回写任务记录。工作空间失效仍降级普通任务。
+    let thread: ThreadRecord | null = null;
+    let reused = false;
+    if (task.threadId) {
+      try {
+        thread = this.#db.getThread(task.threadId);
+        reused = Boolean(thread);
+      } catch {
+        thread = null;
+      }
+    }
+    if (!thread) {
+      if (task.cwd) {
+        try {
+          thread = await this.createThread({
+            title: task.name,
+            mode: "project",
+            cwd: task.cwd,
+            workspaceRoots: [task.cwd],
+            providerId: task.providerId ?? null,
+            modelId: task.modelId ?? null
+          });
+        } catch {
+          thread = null;
+        }
+      }
+      thread ??= await this.createThread({
+        title: task.name,
+        mode: "chat",
+        providerId: task.providerId ?? null,
+        modelId: task.modelId ?? null
+      });
+      // 会话被删后重建时换新线程；任务记录回写（任务被删则线程仍跑完本轮）。
+      try {
+        this.#requireScheduler().setTaskThread(task.id, thread.id);
+      } catch {
+        // ignore
+      }
+    }
+    // 任务级推理强度：每次执行都同步任务配置（null = 清除线程覆盖、跟随全局），
+    // 否则上一次执行留下的覆盖会一直压住全局配置。
+    this.#runtime.setThreadReasoningEffort(thread.id, task.reasoningEffort ?? null);
+    // 让渲染层历史列表立刻看到这个线程（sendMessage 只在首条消息改标题时 emit）。
+    try {
+      await this.emit({
+        type: "thread.updated",
+        threadId: thread.id,
+        payload: { thread },
+        createdAt: new Date().toISOString()
+      });
+    } catch {
+      // 通知失败不影响执行本身。
+    }
+    const startedAt = Date.now();
+    try {
+      await this.sendMessage(thread.id, task.prompt);
+    } catch (error) {
+      return { threadId: thread.id, ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    // 任务名即标题：新建线程的首条消息会把标题提炼成规则/模型标题，这里在
+    // 入队完成后改回任务名；模型命名服务只在「当前标题 === 规则标题」时覆盖，
+    // 所以不会再抢回去。复用会话时不改，尊重用户可能的手动改名。
+    if (!reused) {
+      try {
+        const current = this.#db.getThread(thread.id);
+        if (current && current.title !== task.name) {
+          const renamed = this.#db.updateThread(thread.id, { title: task.name });
+          await this.emit({
+            type: "thread.updated",
+            threadId: thread.id,
+            payload: { thread: renamed },
+            createdAt: new Date().toISOString()
+          });
+        }
+      } catch {
+        // 标题回写失败不影响执行。
+      }
+    }
+    // 轮询等待本轮对话结束：running/waiting 视为仍在执行。waiting（等审批/
+    // 等输入）没有人值守，靠总超时兜底。
+    const turnTimeoutMs = 30 * 60 * 1000;
+    const pollIntervalMs = 3_000;
+    while (Date.now() - startedAt < turnTimeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      let status: ThreadRecord["status"];
+      try {
+        status = this.#db.getThread(thread.id).status;
+      } catch {
+        return { threadId: thread.id, ok: false, error: "会话已被删除，任务中止。" };
+      }
+      if (status === "running" || status === "waiting") continue;
+      if (status === "completed") return { threadId: thread.id, ok: true };
+      return { threadId: thread.id, ok: false, error: `会话以 ${status} 状态结束。` };
+    }
+    return { threadId: thread.id, ok: false, error: "执行超时（30 分钟），会话仍在后台，可手动查看。" };
   }
 
   #requireDownloadService(): DownloadService {

@@ -433,6 +433,7 @@ const CHILD_READ_ONLY_FORBIDDEN_TOOLS = new Set([
   "skills.install", "plugins.install", "mcp.install",
   "image.generate", "video.generate",
   "knowledge.create", "knowledge.add", "knowledge.update", "knowledge.delete", "todo.write",
+  "scheduler_manage",
   "git.stage_file", "git.stage_all", "git.unstage_file", "git.revert_file", "git.apply_hunk",
   "git.commit", "git.push", "git.pull", "git.create_pr", "git.worktree_add", "git.worktree_remove",
   "browser.open_tab", "browser.click", "browser.fill", "browser.select_option", "browser.press_key",

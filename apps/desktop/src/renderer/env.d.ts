@@ -16,6 +16,8 @@ type UpdateState = {
 
 type RendererSkillLabEvent = import("@shared-types").SkillLabEvent;
 type RendererDownloadSnapshot = import("@shared-types").DownloadServiceSnapshot;
+type RendererSchedulerState = import("@shared-types").SchedulerStatePayload;
+type RendererSchedulerTask = import("@shared-types").SchedulerTask;
 type RendererNotificationNavigationTarget = import("@shared-types").NotificationNavigationTarget;
 type RendererPendingResumeThread = import("@shared-types").PendingResumeThread;
 type RendererRuntimeLogPage = import("@shared-types").RuntimeLogPage;
@@ -375,6 +377,13 @@ declare global {
       installP2pDependency: () => Promise<boolean>;
       onP2pInstallProgress: (listener: (line: string) => void) => () => void;
       onDownloadState: (listener: (snapshot: RendererDownloadSnapshot) => void) => () => void;
+      getSchedulerState: () => Promise<RendererSchedulerState>;
+      upsertSchedulerTask: (payload: Partial<RendererSchedulerTask> & { name?: string; prompt?: string }) => Promise<RendererSchedulerTask>;
+      deleteSchedulerTask: (id: string) => Promise<boolean>;
+      setSchedulerTaskEnabled: (id: string, enabled: boolean) => Promise<RendererSchedulerTask>;
+      runSchedulerTaskNow: (id: string) => Promise<boolean>;
+      deleteSchedulerRun: (id: string) => Promise<boolean>;
+      onSchedulerState: (listener: (state: RendererSchedulerState) => void) => () => void;
       importKnowledge: (payload: {
         displayName: string;
         scope: "global" | "project" | "imported";

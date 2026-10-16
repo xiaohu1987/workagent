@@ -99,6 +99,15 @@ export function IconBell() {
   );
 }
 
+export function IconClock() {
+  return (
+    <SvgIcon>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </SvgIcon>
+  );
+}
+
 export function IconNotificationStatus({ status }: { status: NotificationCenterItem["status"] }) {
   if (status === "completed") return <IconCheck />;
   if (status === "failed") return <IconClose />;

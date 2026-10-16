@@ -28,7 +28,7 @@ describe("sidebar nav item split", () => {
 
   it("moves hidden entries into the flyout in rail order", () => {
     const split = splitSidebarNavItems(["documentViewer", "quickNotes"]);
-    expect(split.visible).toEqual(["apiFavorites", "downloads"]);
+    expect(split.visible).toEqual(["apiFavorites", "downloads", "scheduler"]);
     expect(split.hidden).toEqual(["quickNotes", "documentViewer"]);
   });
 

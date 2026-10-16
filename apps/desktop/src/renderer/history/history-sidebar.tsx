@@ -15,6 +15,7 @@ import {
   IconFolders,
   IconGear,
   IconHelpCircle,
+  IconClock,
   IconPin,
   IconPlus,
   IconRename,
@@ -98,6 +99,10 @@ type Props = {
   downloadsActive?: boolean;
   /** 下载入口右侧的数量：正在下载（含解析中）的任务数，0 时入口不显示徽标。 */
   downloadsActiveCount?: number;
+  onOpenScheduler: () => void;
+  schedulerActive?: boolean;
+  /** 定时任务生成/绑定的会话 id 集合：这些会话在列表里带小时钟徽标。 */
+  schedulerThreadIds?: Set<string>;
   /** Rail entries the user tucked into the "更多" flyout; empty keeps them inline. */
   hiddenSidebarItems?: SidebarNavItemId[];
   onOpenSearch: () => void;
@@ -117,7 +122,7 @@ type Props = {
   onRemoveProject: (cwd: string) => void;
 };
 
-export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, onOpenDownloads, downloadsActive = false, downloadsActiveCount = 0, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
+export const HistorySidebar = memo(function HistorySidebar({ projectGroups, standaloneThreads, selectedThreadId, deletingThreadId, expandedProjectGroups, setExpandedProjectGroups, expandedGroups, setExpandedGroups, renamingThread, setRenamingThread, onCommitRename, onCancelRename, onCreateTask, onOpenThread, onOpenQuickNotes, quickNotesActive = false, onOpenApiFavorites, apiFavoritesActive = false, onOpenDocumentViewer, documentViewerActive = false, documentViewerOpenCount = 0, onOpenDownloads, downloadsActive = false, downloadsActiveCount = 0, onOpenScheduler, schedulerActive = false, schedulerThreadIds, hiddenSidebarItems = [], onOpenSearch, onOpenSettings, updatePhase, updateReminder, onOpenHelp, isGeneratingUserSkill, onGenerateUserSkill, onTogglePinned, onRequestDelete, onRequestBatchDelete, batchDeleting = false, onBeginRename, onEditProject, onCreateProjectChat, onRemoveProject }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; thread: ThreadRecord } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; cwd: string } | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readStoredStringSet(HISTORY_COLLAPSED_SECTIONS_STORAGE_KEY));
@@ -441,7 +446,7 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
         onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, thread }); }}
       >
         {selectionMode && !renaming ? <button type="button" className={`history-item-select ${selectedThreadIds.has(thread.id) ? "is-selected" : ""}`} aria-label={`${selectedThreadIds.has(thread.id) ? "取消选择" : "选择"} ${thread.title}`} aria-pressed={selectedThreadIds.has(thread.id)} disabled={!canDeleteThread(thread.status, deletingThreadId) || batchDeleting} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); if (consumeSuppressedClick(event)) return; toggleThreadSelection(thread); }}><span aria-hidden="true">{selectedThreadIds.has(thread.id) ? <IconCheck /> : null}</span></button> : null}
-        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={(event) => { if (consumeSuppressedClick(event)) return; activateHistoryThread(thread); }}><span className="history-item-label">{thread.title}</span><span className="history-item-time">{formatRelativeTime(thread.updatedAt)}</span>{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
+        {renaming ? <input className="history-item-rename-input" autoFocus value={renamingThread.title} aria-label="重命名任务" onFocus={(event) => event.currentTarget.select()} onChange={(event) => setRenamingThread({ id: thread.id, title: event.target.value })} onBlur={(event) => void onCommitRename(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); onCancelRename(); } }} onClick={(event) => event.stopPropagation()} /> : <button type="button" className="history-item-main" onClick={(event) => { if (consumeSuppressedClick(event)) return; activateHistoryThread(thread); }}><span className="history-item-label">{thread.title}</span><span className="history-item-time">{formatRelativeTime(thread.updatedAt)}</span>{schedulerThreadIds?.has(thread.id) ? <span className="history-item-scheduler" title="定时任务会话" aria-label="定时任务会话"><IconClock /></span> : null}{thread.isPinned ? <span className="history-item-pin" title="已置顶" aria-label="已置顶"><IconPin /></span> : null}</button>}
       </div>
     );
   }
@@ -471,13 +476,15 @@ export const HistorySidebar = memo(function HistorySidebar({ projectGroups, stan
     quickNotes: () => void onOpenQuickNotes(),
     apiFavorites: onOpenApiFavorites,
     documentViewer: onOpenDocumentViewer,
-    downloads: onOpenDownloads
+    downloads: onOpenDownloads,
+    scheduler: onOpenScheduler
   };
   const railItemActiveStates: Record<SidebarNavItemId, boolean> = {
     quickNotes: quickNotesActive,
     apiFavorites: apiFavoritesActive,
     documentViewer: documentViewerActive,
-    downloads: downloadsActive
+    downloads: downloadsActive,
+    scheduler: schedulerActive
   };
   /**
    * 入口上的可选数量：「查看文档」带已打开的文档数，「下载」带正在下载的

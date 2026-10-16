@@ -409,6 +409,18 @@ const api = {
     ipcRenderer.on("downloads:state", wrapped);
     return () => ipcRenderer.off("downloads:state", wrapped);
   },
+  getSchedulerState: () => ipcRenderer.invoke("scheduler:get-state"),
+  upsertSchedulerTask: (payload: unknown) => ipcRenderer.invoke("scheduler:upsert", payload),
+  deleteSchedulerTask: (id: string) => ipcRenderer.invoke("scheduler:delete", id),
+  setSchedulerTaskEnabled: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke("scheduler:set-enabled", { id, enabled }),
+  runSchedulerTaskNow: (id: string) => ipcRenderer.invoke("scheduler:run-now", id),
+  deleteSchedulerRun: (id: string) => ipcRenderer.invoke("scheduler:delete-run", id),
+  onSchedulerState: (listener: (state: unknown) => void) => {
+    const wrapped = (_event: unknown, state: unknown) => listener(state);
+    ipcRenderer.on("scheduler:state", wrapped);
+    return () => ipcRenderer.off("scheduler:state", wrapped);
+  },
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on("runtime:event", wrapped);

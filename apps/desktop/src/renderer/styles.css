@@ -1108,9 +1108,16 @@ pre {
   overflow: auto;
   background: transparent;
   color: transparent;
-  caret-color: currentColor;
+  /* color 是 transparent（正文由高亮层渲染），caret-color 不能用 currentColor，
+     否则解析成透明导致光标隐形。 */
+  caret-color: #f4f7fb;
   resize: none;
   outline: none;
+}
+
+/* 超过高亮上限的大文件没有高亮层兜底，正文直接由 textarea 自己渲染。 */
+.document-editor-input.document-editor-input-plain {
+  color: var(--text, #e8ebf0);
 }
 
 .document-editor-status {
@@ -12043,6 +12050,32 @@ input[type="radio"]:focus-visible {
   letter-spacing: -0.04em;
 }
 
+.batch-delete-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.batch-delete-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22);
+  overflow: hidden;
+}
+
+.batch-delete-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(248, 113, 113, 0.95), rgba(239, 68, 68, 0.95));
+  transition: width 0.25s ease;
+}
+
+.batch-delete-progress > span {
+  color: #858a95;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
 .update-confirm-sheet {
   width: min(460px, calc(100vw - 32px));
 }
@@ -16127,6 +16160,22 @@ input[type="radio"]:focus-visible {
 .history-item-pin svg {
   width: 14px;
   height: 14px;
+}
+
+/* 定时任务会话徽标：小时钟，与主操作蓝同调，弱于置顶图标的视觉权重。 */
+.history-item-scheduler {
+  display: inline-grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--action-primary, #2196f3);
+  opacity: 0.85;
+}
+
+.history-item-scheduler svg {
+  width: 12px;
+  height: 12px;
 }
 
 .history-item-delete {
@@ -23397,6 +23446,18 @@ body.is-history-trashing {
 .app-shell.has-app-background .mcp-create-sheet .form-field select {
   background: rgba(16, 17, 22, min(0.58, calc(var(--app-bg-dialog) * 0.82)));
   backdrop-filter: blur(12px);
+}
+
+/* 聊天区里的随手记/接口卡片面板：列表列与详情列不再垫深色，
+   与查看文档一致直接透出壁纸。不限壁纸类型（图片壁纸 has-app-background /
+   动态背景 has-realtime-character 都生效）；无壁纸时与聊天底色同色无感。 */
+.quick-notes-sheet.quick-notes-inline .quick-notes-list {
+  background: transparent;
+  backdrop-filter: none;
+}
+
+:root .api-favorites-inline .api-favorites-detail {
+  background: transparent;
 }
 
 .app-shell.has-app-background .provider-list-card,
@@ -30907,9 +30968,21 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   flex: 1 1 auto;
   min-width: 0;
   border: none;
+  /* 全局 input reset 会带来 padding/圆角，聚焦态还有 box-shadow 光圈，
+     都会在这个小胶囊里画出一个「多出来的框」，这里全部归零。 */
+  border-radius: 0;
+  padding: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--text-soft);
   font-size: 12px;
+  outline: none;
+}
+
+.composer-status-search input:focus,
+.composer-status-search input:focus-visible {
+  border: none;
+  box-shadow: none;
   outline: none;
 }
 
@@ -31598,11 +31671,7 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   display: none !important;
 }
 
-/* 接管聊天区时给一层毛玻璃表面：有壁纸时保证面板可读，无壁纸时与底色自然融合。 */
-.chat-canvas.is-downloads {
-  background: rgba(13, 14, 17, 0.74);
-  backdrop-filter: blur(18px);
-}
+/* 背景保持透明（与查看文档一致）：应用壁纸直接从面板后面透出来。 */
 
 /* 下载面板复用随手记的 quick-notes-inline 骨架，这里只做作用域补充，
    与接口卡片的 api-favorites-inline 同一套法。 */
@@ -32279,10 +32348,6 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-}
-
-:root[data-theme="light"] .chat-canvas.is-downloads {
-  background: rgba(247, 250, 253, 0.82);
 }
 
 :root[data-theme="light"] .downloads-url-input { background: #f1f6fb; }

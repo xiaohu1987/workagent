@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, isGptFamilyModel, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
+import { DEFAULT_PROJECT_EXECUTION_POLICY, addTokenUsage, createEmptyTokenUsage, finalizeTokenUsage, isGptFamilyModel, isGptReasoningEffort, normalizeCompletionAuditEnabled, resolveCompletionAuditModeSettings, resolveModelReasoningEffort } from "@shared-types";
 import type {
   AppConfig,
   AssistantDraftPhase,
@@ -12,6 +12,7 @@ import type {
   CompletionEvidenceKind,
   ContextSegmentUsage,
   ErrorSolutionRecord,
+  GptReasoningEffort,
   MessageAttachment,
   McpRepositoryToolResult,
   McpServerConfig,
@@ -1714,11 +1715,17 @@ class ThreadSessionRuntime {
   #cachePrefixMeasurement: CachePrefixMeasurement | null = null;
   #useFunctionCallCompatibilityTranscript = false;
   #responsesContinuation = new Map<string, ResponsesContinuationState>();
+  // 线程级推理强度覆盖（定时任务按任务配置执行用）；空 = 跟随全局配置。
+  #reasoningEffortOverride: GptReasoningEffort | null = null;
 
   public constructor(
     private readonly threadId: string,
     private readonly services: RuntimeServices
   ) {}
+
+  public setReasoningEffortOverride(effort: GptReasoningEffort | null): void {
+    this.#reasoningEffortOverride = effort && isGptReasoningEffort(effort) ? effort : null;
+  }
 
   public start(): void {
     if (this.#running) {
@@ -3875,7 +3882,10 @@ class ThreadSessionRuntime {
               availableTools: requestTools,
               model: requestModel,
               provider: requestProvider,
-              reasoningEffort: resolveModelReasoningEffort(model, this.services.config.reasoningEffort),
+              reasoningEffort: resolveModelReasoningEffort(
+                model,
+                this.#reasoningEffortOverride ?? this.services.config.reasoningEffort
+              ),
               forceTextToolProtocol: useTextToolProtocol,
               incrementalResponses: this.services.config.incrementalResponses === true,
               stream: requestUsesStreaming,
@@ -11438,8 +11448,23 @@ function normalizeWorkspacePolicyKey(workspacePath: string): string {
 
 export class AgentRuntimeService {
   readonly #sessions = new Map<string, ThreadSessionRuntime>();
+  // 线程级推理强度覆盖：会话还没建（或已重建）时也要记住，ensureThread 时回放。
+  readonly #threadReasoningEfforts = new Map<string, GptReasoningEffort>();
 
   public constructor(private readonly services: RuntimeServices) {}
+
+  /**
+   * 按线程覆盖推理强度（定时任务按任务配置执行用）；null = 清除覆盖、跟随全局。
+   * 只影响该线程的模型请求，不改动全局配置。
+   */
+  public setThreadReasoningEffort(threadId: string, effort: GptReasoningEffort | null): void {
+    if (effort && isGptReasoningEffort(effort)) {
+      this.#threadReasoningEfforts.set(threadId, effort);
+    } else {
+      this.#threadReasoningEfforts.delete(threadId);
+    }
+    this.#sessions.get(threadId)?.setReasoningEffortOverride(effort);
+  }
 
   public ensureThread(threadId: string): ThreadSessionRuntime {
     const existing = this.#sessions.get(threadId);
@@ -11447,6 +11472,10 @@ export class AgentRuntimeService {
       return existing;
     }
     const runtime = new ThreadSessionRuntime(threadId, this.services);
+    const effort = this.#threadReasoningEfforts.get(threadId);
+    if (effort) {
+      runtime.setReasoningEffortOverride(effort);
+    }
     runtime.start();
     this.#sessions.set(threadId, runtime);
     return runtime;

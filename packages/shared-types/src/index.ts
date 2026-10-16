@@ -1170,7 +1170,7 @@ export function resolveCompletionAuditModeSettings(
  * Sidebar rail entries the user can keep inline or tuck into the "更多" flyout.
  * The id order here is also the render order on the rail.
  */
-export const SIDEBAR_NAV_ITEM_IDS = ["quickNotes", "apiFavorites", "documentViewer", "downloads"] as const;
+export const SIDEBAR_NAV_ITEM_IDS = ["quickNotes", "apiFavorites", "documentViewer", "downloads", "scheduler"] as const;
 
 export type SidebarNavItemId = (typeof SIDEBAR_NAV_ITEM_IDS)[number];
 
@@ -1911,4 +1911,95 @@ export interface ShareImageResult {
   cancelled: boolean;
   /** Human readable outcome used for the in-app notice. */
   message: string;
+}
+
+/* ---------------------------------------------------------------------------
+ * 定时任务小工具：任务配置 + 运行记录。配置与记录都由主进程持久化为 JSON，
+ * 执行时按普通聊天形式新建线程并投递提示词。
+ * --------------------------------------------------------------------------- */
+
+export type SchedulerScheduleType = "once" | "daily" | "weekly" | "monthly";
+
+export interface SchedulerTask {
+  id: string;
+  name: string;
+  /** 到点后按普通聊天投递给新线程的提示词。 */
+  prompt: string;
+  enabled: boolean;
+  scheduleType: SchedulerScheduleType;
+  /** 本地时间 HH:mm，once/daily/weekly/monthly 通用。 */
+  time: string;
+  /** weekly 专用：0=周日 … 6=周六。 */
+  weekday?: number;
+  /** monthly 专用：1-28（规避月末歧义）。 */
+  monthDay?: number;
+  /** once 专用：ISO 本地时间字符串。 */
+  runAt?: string;
+  /** 选中的工作空间根目录；空 = 不使用工作空间（普通任务）。 */
+  cwd?: string | null;
+  /** 执行用的供应商/模型；空 = 跟随应用默认模型。 */
+  providerId?: string | null;
+  modelId?: string | null;
+  /** 任务级推理强度；空 = 跟随应用全局配置。 */
+  reasoningEffort?: GptReasoningEffort | null;
+  /** 该任务固定使用的会话线程；每次执行都续聊同一线程，会话被删后重建。 */
+  threadId?: string | null;
+  /** ISO 日期（含），缺省 = 长期有效。 */
+  validUntil?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** 下次计划时间（ISO），过期/一次性任务跑完为 null。 */
+  nextRunAt: string | null;
+  lastRunAt?: string | null;
+}
+
+export type SchedulerRunStatus =
+  | "running"
+  | "success"
+  | "failed"
+  | "catchup_success"
+  | "catchup_failed"
+  | "test_success"
+  | "test_failed";
+
+export type SchedulerRunKind = "scheduled" | "catchup" | "test";
+
+export interface SchedulerRunRecord {
+  id: string;
+  taskId: string;
+  taskName: string;
+  status: SchedulerRunStatus;
+  kind: SchedulerRunKind;
+  /** 计划触发时间（补跑时早于 startedAt）。 */
+  scheduledAt: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  /** 本次运行对应的普通聊天线程，运行记录可跳回会话。 */
+  threadId?: string;
+  error?: string;
+}
+
+export interface SchedulerStatePayload {
+  tasks: SchedulerTask[];
+  runs: SchedulerRunRecord[];
+  now: string;
+}
+
+/** LLM 的 scheduler_manage 工具入参；渲染层对话框只用到其中一部分。 */
+export interface SchedulerManageInput {
+  action: "list" | "create" | "update" | "delete" | "set_enabled" | "run_now";
+  id?: string;
+  name?: string;
+  prompt?: string;
+  scheduleType?: SchedulerScheduleType;
+  time?: string;
+  weekday?: number;
+  monthDay?: number;
+  runAt?: string;
+  validUntil?: string | null;
+  providerId?: string | null;
+  modelId?: string | null;
+  reasoningEffort?: GptReasoningEffort | null;
+  enabled?: boolean;
 }

@@ -9,6 +9,7 @@ import type {
   MessageAttachment,
   NotificationNavigationTarget,
   RuntimeEvent,
+  SchedulerTask,
   ShareSendRequest,
   ShareImageRequest,
   ShareImageResult,
@@ -26,6 +27,7 @@ import {
 } from "./notification-policy";
 import { UpdateService } from "./update-service";
 import { DownloadService } from "./download-service";
+import { SchedulerService } from "./scheduler-service";
 import { executeHttpRequest, type HttpProxyRequestPayload } from "./http-proxy";
 import { LiveEditPreviewWindow } from "./live-edit-preview-window";
 import { getLiveEditWriteTargets } from "./live-edit-preview-utils";
@@ -60,6 +62,7 @@ let pendingTrayNotificationClick: (() => void) | null = null;
 const backend = new DesktopBackend();
 let updates: UpdateService | null = null;
 let downloads: DownloadService | null = null;
+let scheduler: SchedulerService | null = null;
 const runtimeThreadStatuses = new Map<string, ThreadStatus>();
 const deliveredSystemNotificationKeys = new Set<string>();
 let registeredScreenshotShortcut: string | null = null;
@@ -411,6 +414,7 @@ function broadcastTheme(): void {
 
 function quitApplication(): void {
   isQuitting = true;
+  scheduler?.stop();
   liveEditPreview.destroy();
   conversationLogWindow.destroy();
   tray?.destroy();
@@ -584,6 +588,18 @@ async function createWindow(): Promise<void> {
   backend.attachDownloadService(downloads);
   void downloads.start().catch((error) => {
     console.error("[downloads] Failed to restore persisted tasks", error);
+  });
+  // 定时任务小工具：到点后按普通聊天形式执行（新建线程投递提示词）。
+  scheduler = new SchedulerService({
+    dataDir: path.join(app.getPath("userData"), "scheduler"),
+    exec: (task, kind) => backend.runScheduledChatTask(task, kind),
+    emit: (state) => mainWindow?.webContents.send("scheduler:state", state),
+    log: (kind, payload) => backend.appendRuntimeLog(kind, payload),
+    getThreadStatus: (threadId) => backend.getThreadStatus(threadId)
+  });
+  backend.attachSchedulerService(scheduler);
+  void scheduler.start().catch((error) => {
+    console.error("[scheduler] Failed to start", error);
   });
   const workArea = screen.getPrimaryDisplay().workArea;
   const preferredWidth = 1212;
@@ -862,6 +878,32 @@ function registerIpc(): void {
   ipcMain.handle("downloads:set-default-dir", (_event, dir: string) =>
     backend.setDownloadDir(typeof dir === "string" ? dir : "")
   );
+  // 定时任务小工具：任务配置 + 运行记录 + 测试运行。
+  ipcMain.handle("scheduler:get-state", () => {
+    try {
+      return backend.getSchedulerState();
+    } catch {
+      return { tasks: [], runs: [], now: new Date().toISOString() };
+    }
+  });
+  ipcMain.handle("scheduler:upsert", (_event, payload: Partial<SchedulerTask> & { name?: string; prompt?: string }) =>
+    backend.upsertSchedulerTask(payload)
+  );
+  ipcMain.handle("scheduler:delete", (_event, id: string) => {
+    backend.deleteSchedulerTask(id);
+    return true;
+  });
+  ipcMain.handle("scheduler:set-enabled", (_event, payload: { id: string; enabled: boolean }) =>
+    backend.setSchedulerTaskEnabled(payload.id, Boolean(payload.enabled))
+  );
+  ipcMain.handle("scheduler:run-now", (_event, id: string) => {
+    backend.runSchedulerTaskNow(id);
+    return true;
+  });
+  ipcMain.handle("scheduler:delete-run", (_event, id: string) => {
+    backend.deleteSchedulerRun(id);
+    return true;
+  });
   ipcMain.handle("downloads:reveal", (_event, filePath: string) => {
     if (typeof filePath !== "string" || !path.isAbsolute(filePath)) return false;
     shell.showItemInFolder(filePath);
