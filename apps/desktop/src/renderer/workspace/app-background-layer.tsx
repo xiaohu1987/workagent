@@ -1,15 +1,18 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { getChatBackgroundTransform, type ChatBackgroundSettings } from "../chat-background";
+import { getChatBackgroundBlurFilter, getChatBackgroundTransform, type ChatBackgroundSettings } from "../chat-background";
 
 type BackgroundImage = { id: string; url: string };
 
 type Props = {
   images: BackgroundImage[];
+  videos: BackgroundImage[];
   activeIndex: number;
+  activeVideoIndex: number;
   settings: ChatBackgroundSettings;
+  onVideoEnded: () => void;
 };
 
-export const AppBackgroundLayer = memo(function AppBackgroundLayer({ images, activeIndex, settings }: Props) {
+export const AppBackgroundLayer = memo(function AppBackgroundLayer({ images, videos, activeIndex, activeVideoIndex, settings, onVideoEnded }: Props) {
   const lastActiveIndexRef = useRef(activeIndex);
   const [retainedPreviousIndex, setRetainedPreviousIndex] = useState<number | null>(null);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
@@ -43,6 +46,91 @@ export const AppBackgroundLayer = memo(function AppBackgroundLayer({ images, act
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
+
+  const showCustomVideo = settings.mode === "dynamic" && settings.dynamicSource === "custom" && videos.length > 0;
+  const activeVideo = videos[activeVideoIndex] ?? null;
+  const videoPlaybackTimeRef = useRef(0);
+  const [videoTransition, setVideoTransition] = useState<{
+    active: BackgroundImage | null;
+    outgoing: BackgroundImage | null;
+    outgoingTime: number;
+  }>(() => ({
+    active: activeVideo,
+    outgoing: null,
+    outgoingTime: 0
+  }));
+
+  if (videoTransition.active?.id !== activeVideo?.id) {
+    setVideoTransition({
+      active: activeVideo,
+      outgoing: videoTransition.active,
+      outgoingTime: videoPlaybackTimeRef.current
+    });
+    videoPlaybackTimeRef.current = 0;
+  }
+
+  useEffect(() => {
+    if (!videoTransition.outgoing) return;
+    const activeId = videoTransition.active?.id;
+    const timer = window.setTimeout(() => {
+      setVideoTransition((current) => current.active?.id === activeId
+        ? { ...current, outgoing: null }
+        : current);
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [videoTransition.active?.id, videoTransition.outgoing?.id]);
+
+  if (showCustomVideo && activeVideo) {
+    const opacity = settings.opacity / 100;
+    const videoStyle = { objectFit: settings.fit, objectPosition: "center", opacity } as const;
+    return (
+      <div className="app-background-layer" aria-hidden="true">
+        <div className="app-background-motion is-active">
+          <div className="app-background-parallax app-background-video-stack">
+            {videoTransition.outgoing ? (
+              <div
+                key={videoTransition.outgoing.id}
+                className="app-background-video-layer is-leaving"
+                aria-hidden="true"
+              >
+                <video
+                  className="app-background-video"
+                  src={videoTransition.outgoing.url}
+                  muted
+                  playsInline
+                  preload="auto"
+                  onLoadedMetadata={(event) => {
+                    if (videoTransition.outgoingTime > 0 && Number.isFinite(event.currentTarget.duration)) {
+                      event.currentTarget.currentTime = Math.min(videoTransition.outgoingTime, event.currentTarget.duration);
+                    }
+                  }}
+                  style={{ ...videoStyle, filter: getChatBackgroundBlurFilter(settings.videoBlur) }}
+                />
+              </div>
+            ) : null}
+            <div
+              key={activeVideo.id}
+              className={`app-background-video-layer ${videoTransition.outgoing ? "is-entering" : ""}`}
+            >
+              <video
+                className="app-background-video"
+                src={activeVideo.url}
+                autoPlay
+                muted
+                loop={videos.length === 1 || !settings.videoRotationEnabled}
+                playsInline
+                preload="auto"
+                onEnded={onVideoEnded}
+                onTimeUpdate={(event) => { videoPlaybackTimeRef.current = event.currentTarget.currentTime; }}
+                onLoadedMetadata={(event) => { void event.currentTarget.play().catch(() => undefined); }}
+                style={{ ...videoStyle, filter: getChatBackgroundBlurFilter(settings.videoBlur) }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-background-layer" aria-hidden="true">

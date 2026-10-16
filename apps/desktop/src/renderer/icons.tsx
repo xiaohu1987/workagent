@@ -247,6 +247,15 @@ export function IconImage() {
   );
 }
 
+export function IconVideo() {
+  return (
+    <SvgIcon>
+      <rect x="3" y="6" width="13" height="12" rx="2" />
+      <path d="m16 10.5 5-3v9l-5-3" />
+    </SvgIcon>
+  );
+}
+
 export function IconUpload() {
   return (
     <SvgIcon size={16}>
@@ -263,15 +272,6 @@ export function IconDownload() {
       <path d="M12 4v12" />
       <path d="m7.5 11.5 4.5 4.5 4.5-4.5" />
       <path d="M5 19.5h14" />
-    </SvgIcon>
-  );
-}
-
-export function IconVideo() {
-  return (
-    <SvgIcon>
-      <rect x="3.5" y="6" width="12" height="12" rx="2" />
-      <path d="m15.5 10 5-2.5v9L15.5 14z" />
     </SvgIcon>
   );
 }

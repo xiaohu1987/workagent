@@ -23270,6 +23270,64 @@ body.is-history-trashing {
   will-change: transform;
 }
 
+.app-background-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.app-background-video-stack {
+  overflow: hidden;
+}
+
+.app-background-video-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.app-background-video-layer.is-leaving {
+  animation: app-background-video-fade-out 600ms ease both;
+}
+
+.app-background-video-layer.is-entering {
+  animation: app-background-video-fade-in 600ms ease both;
+}
+
+@keyframes app-background-video-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes app-background-video-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.chat-background-video-error {
+  position: absolute;
+  z-index: 2;
+  inset: auto 12px 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 150, 150, 0.28);
+  border-radius: 7px;
+  color: #ffd2d2;
+  background: rgba(70, 20, 24, 0.88);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Custom video backgrounds expose only video-specific visual and playlist controls. */
+.chat-background-controls.is-custom-dynamic .chat-background-visual-controls,
+.chat-background-controls.is-custom-dynamic .chat-background-fit-control,
+.chat-background-controls.is-custom-dynamic .chat-background-surface-group,
+.chat-background-controls.is-custom-dynamic .chat-background-actions {
+  display: none;
+}
+.chat-background-library.is-custom-dynamic .custom-video-rotation-interval {
+  display: none;
+}
+
 .chat-scroll,
 .right-workspace-panel,
 .workspace-terminal-drawer {
@@ -23353,6 +23411,11 @@ body.is-history-trashing {
   }
 
   .app-background-atmosphere::before {
+    animation: none;
+  }
+
+  .app-background-video-layer.is-entering,
+  .app-background-video-layer.is-leaving {
     animation: none;
   }
 }
@@ -24451,10 +24514,11 @@ body:has(.app-shell.has-app-background) .file-preview-lightbox-loading {
   text-align: left;
 }
 
-.chat-background-image-select img {
+.chat-background-image-select :is(img, video) {
   width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;
+  display: block;
 }
 
 .chat-background-image-select span {

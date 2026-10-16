@@ -2,6 +2,9 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, ty
 import {
   DEFAULT_CHAT_BACKGROUND_SURFACES,
   getChatBackgroundActiveIndex,
+  getChatBackgroundRandomNextIndex,
+  getChatBackgroundVideoActiveIndex,
+  getChatBackgroundVideoMimeType,
   getChatBackgroundSurfaceStyleVars,
   isChatBackgroundRotationActive,
   loadChatBackgroundBlob,
@@ -24,6 +27,8 @@ export type ChatBackgroundImage = {
   url: string;
 };
 
+export type ChatBackgroundVideo = ChatBackgroundImage;
+
 type Options = {
   appShellRef: RefObject<HTMLDivElement | null>;
   showNotice: Notice;
@@ -38,13 +43,17 @@ function waitForBackgroundStorage(delayMs: number): Promise<void> {
 export function useChatBackground({ appShellRef, showNotice }: Options) {
   const [settings, setSettings] = useState<ChatBackgroundSettings>(() => readChatBackgroundSettings());
   const [images, setImages] = useState<ChatBackgroundImage[]>([]);
+  const [videos, setVideos] = useState<ChatBackgroundVideo[]>([]);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+  const [activeVideoIndex, setActiveVideoIndex] = useState(0);
   const [rotationEpoch, setRotationEpoch] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
   const hydratedRef = useRef(false);
   const urlsRef = useRef<Set<string>>(new Set());
   const imagesRef = useRef<ChatBackgroundImage[]>([]);
+  const videosRef = useRef<ChatBackgroundVideo[]>([]);
   const dragRef = useRef<null | {
     pointerId: number;
     startX: number;
@@ -56,6 +65,8 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
   }>(null);
   const activeImage = images[activeImageIndex] ?? null;
   const imageUrl = activeImage?.url ?? null;
+  const activeVideo = videos[activeVideoIndex] ?? null;
+  const videoUrl = activeVideo?.url ?? null;
 
   useEffect(() => {
     let active = true;
@@ -75,8 +86,15 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
               urlsRef.current.add(url);
               return { ...item, url };
             });
+            const restoredVideos = persisted.videos.map((item) => {
+              const url = URL.createObjectURL(new Blob([item.bytes], { type: item.mimeType }));
+              urlsRef.current.add(url);
+              return { ...item, url };
+            });
             setImages(restoredImages);
+            setVideos(restoredVideos);
             setActiveImageIndex(getChatBackgroundActiveIndex(restoredSettings, restoredImages));
+            setActiveVideoIndex(getChatBackgroundVideoActiveIndex(restoredSettings, restoredVideos));
             return;
           }
 
@@ -127,7 +145,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
 
   useEffect(() => {
     const root = document.documentElement;
-    const active = Boolean(imageUrl && settings.enabled);
+    const active = Boolean((imageUrl || videoUrl) && settings.enabled);
     const vars = getChatBackgroundSurfaceStyleVars(settings.surfaces);
     if (active) {
       for (const [key, value] of Object.entries(vars)) root.style.setProperty(key, value);
@@ -137,7 +155,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     }
     for (const key of Object.keys(vars)) root.style.removeProperty(key);
     return undefined;
-  }, [imageUrl, settings.enabled, settings.surfaces]);
+  }, [imageUrl, videoUrl, settings.enabled, settings.surfaces]);
 
   useEffect(() => {
     const shell = appShellRef.current;
@@ -150,7 +168,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
       shell.style.setProperty("--app-background-parallax-front-x", "0px");
       shell.style.setProperty("--app-background-parallax-front-y", "0px");
     };
-    if (!imageUrl || !settings.enabled || !settings.parallaxEnabled) {
+    if ((!imageUrl && !videoUrl) || !settings.enabled || !settings.parallaxEnabled) {
       reset();
       return;
     }
@@ -191,7 +209,7 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
       reset();
     };
-  }, [appShellRef, imageUrl, settings.enabled, settings.parallaxEnabled]);
+  }, [appShellRef, imageUrl, videoUrl, settings.enabled, settings.parallaxEnabled]);
 
   useEffect(() => () => {
     for (const url of urlsRef.current) URL.revokeObjectURL(url);
@@ -204,6 +222,12 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
   }, [images]);
 
   useEffect(() => {
+    videosRef.current = videos;
+    setActiveVideoIndex((current) => Math.min(current, Math.max(0, videos.length - 1)));
+  }, [videos]);
+
+  useEffect(() => {
+    if (settings.mode !== "image") return;
     if (!isChatBackgroundRotationActive(settings, images.length)) return;
     const interval = window.setInterval(() => {
       setActiveImageIndex((current) => (current + 1) % images.length);
@@ -236,6 +260,32 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     if (!image) return;
     setActiveImageIndex(index);
     updateSettings({ fileName: image.fileName });
+  }
+
+  function selectVideo(index: number) {
+    const video = videosRef.current[index];
+    if (!video) return;
+    setActiveVideoIndex(index);
+    updateSettings({ videoFileName: video.fileName });
+  }
+
+  function advanceVideo() {
+    const currentVideos = videosRef.current;
+    if (
+      settings.mode !== "dynamic"
+      || settings.dynamicSource !== "custom"
+      || !settings.videoRotationEnabled
+      || currentVideos.length < 2
+    ) return;
+
+    const nextIndex = settings.videoRotationOrder === "random"
+      ? getChatBackgroundRandomNextIndex(activeVideoIndex, currentVideos.length)
+      : (activeVideoIndex + 1) % currentVideos.length;
+    const nextVideo = currentVideos[nextIndex];
+    if (!nextVideo) return;
+
+    setActiveVideoIndex(nextIndex);
+    updateSettings({ videoFileName: nextVideo.fileName });
   }
 
   function beginDrag(event: ReactPointerEvent<HTMLImageElement>) {
@@ -324,6 +374,61 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     for (const file of selectedFiles) await importImage(file);
   }
 
+  async function importVideo(file: File) {
+    // Windows file pickers can return an empty MIME type, so the extension
+    // also determines the canonical type used by the preview and storage.
+    const mimeType = getChatBackgroundVideoMimeType(file);
+    if (!mimeType) {
+      showNotice("请选择 WebM 或 MP4 视频", { message: "自定义动态背景支持 .webm 和 .mp4 格式。", tone: "warning" });
+      return;
+    }
+    if (file.size > 200 * 1024 * 1024) {
+      showNotice("视频过大", { message: "请选择小于 200 MB 的视频。", tone: "warning" });
+      return;
+    }
+
+    let nextUrl: string | null = null;
+    try {
+      const bytes = await file.arrayBuffer();
+      // Build the preview URL from a normalized Blob too. A File may carry an
+      // empty MIME type on Windows even when its extension is valid.
+      nextUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+      const nextVideo: ChatBackgroundVideo = {
+        id: globalThis.crypto.randomUUID(), bytes, mimeType, fileName: file.name, url: nextUrl
+      };
+      const nextVideos = [...videosRef.current, nextVideo];
+      const nextSettings = normalizeChatBackgroundSettings({
+        ...settings,
+        mode: "dynamic",
+        dynamicSource: "custom",
+        videoFileName: file.name
+      });
+      await window.codexh.saveApplicationBackgrounds({
+        items: imagesRef.current.map(({ id, bytes: imageBytes, mimeType, fileName }) => ({ id, bytes: imageBytes, mimeType, fileName })),
+        videos: nextVideos.map(({ id, bytes: videoBytes, mimeType, fileName }) => ({ id, bytes: videoBytes, mimeType, fileName })),
+        settings: nextSettings
+      });
+      urlsRef.current.add(nextUrl);
+      videosRef.current = nextVideos;
+      setVideos(nextVideos);
+      setActiveVideoIndex(nextVideos.length - 1);
+      setSettings(nextSettings);
+      showNotice("自定义动态背景已更新", { message: "可继续添加视频并设置轮播方式。", tone: "success" });
+    } catch (error) {
+      if (nextUrl) URL.revokeObjectURL(nextUrl);
+      showNotice("视频保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    }
+  }
+
+  async function importVideoFiles(files: FileList | File[]) {
+    const selectedFiles = Array.from(files);
+    if (videosRef.current.length + selectedFiles.length > 50) {
+      showNotice("视频数量过多", { message: "自定义动态背景最多支持 50 个视频。", tone: "warning" });
+      return;
+    }
+    for (const file of selectedFiles) await importVideo(file);
+  }
+
   async function removeImage(id: string) {
     const currentImages = imagesRef.current;
     const removed = currentImages.find((image) => image.id === id);
@@ -370,6 +475,54 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     }
   }
 
+  async function removeVideo(id: string) {
+    const currentVideos = videosRef.current;
+    const removed = currentVideos.find((video) => video.id === id);
+    const nextVideos = currentVideos.filter((video) => video.id !== id);
+    try {
+      if (nextVideos.length === 0 && imagesRef.current.length === 0) {
+        await window.codexh.clearApplicationBackground();
+        updateSettings({ mode: "none", videoFileName: null });
+      } else {
+        await window.codexh.saveApplicationBackgrounds({
+          items: imagesRef.current.map(({ id: imageId, bytes, mimeType, fileName }) => ({ id: imageId, bytes, mimeType, fileName })),
+          videos: nextVideos.map(({ id: videoId, bytes, mimeType, fileName }) => ({ id: videoId, bytes, mimeType, fileName })),
+          settings
+        });
+      }
+      if (removed) {
+        URL.revokeObjectURL(removed.url);
+        urlsRef.current.delete(removed.url);
+      }
+      videosRef.current = nextVideos;
+      setVideos(nextVideos);
+      showNotice("背景视频已删除", { tone: "success" });
+    } catch (error) {
+      showNotice("删除背景视频失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    }
+  }
+
+  async function moveVideo(sourceId: string, targetId: string) {
+    const currentVideos = videosRef.current;
+    const from = currentVideos.findIndex((video) => video.id === sourceId);
+    const to = currentVideos.findIndex((video) => video.id === targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    const nextVideos = [...currentVideos];
+    const [moved] = nextVideos.splice(from, 1);
+    nextVideos.splice(to, 0, moved);
+    try {
+      await window.codexh.saveApplicationBackgrounds({
+        items: imagesRef.current.map(({ id, bytes, mimeType, fileName }) => ({ id, bytes, mimeType, fileName })),
+        videos: nextVideos.map(({ id, bytes, mimeType, fileName }) => ({ id, bytes, mimeType, fileName })),
+        settings
+      });
+      videosRef.current = nextVideos;
+      setVideos(nextVideos);
+    } catch (error) {
+      showNotice("背景视频排序保存失败", { message: error instanceof Error ? error.message : String(error), tone: "warning" });
+    }
+  }
+
   async function clear() {
     try {
       await window.codexh.clearApplicationBackground();
@@ -377,8 +530,14 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
         URL.revokeObjectURL(image.url);
         urlsRef.current.delete(image.url);
       }
+      for (const video of videosRef.current) {
+        URL.revokeObjectURL(video.url);
+        urlsRef.current.delete(video.url);
+      }
       imagesRef.current = [];
+      videosRef.current = [];
       setImages([]);
+      setVideos([]);
       updateSettings({ mode: "none", enabled: false, fileName: null });
       showNotice("应用背景已清除", { tone: "success" });
     } catch (error) {
@@ -395,13 +554,22 @@ export function useChatBackground({ appShellRef, showNotice }: Options) {
     images,
     activeImageIndex,
     setActiveImageIndex: selectImage,
+    videos,
+    activeVideoIndex,
+    setActiveVideoIndex: selectVideo,
+    advanceVideo,
     settings,
     inputRef,
+    videoInputRef,
     imageUrl,
+    videoUrl,
     isDragging,
     importFiles,
+    importVideoFiles,
     moveImage,
     removeImage,
+    moveVideo,
+    removeVideo,
     updateSettings,
     updateSurface,
     beginDrag,

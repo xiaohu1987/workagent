@@ -37,10 +37,22 @@ declare global {
           mimeType: string;
           fileName: string;
         }>;
+        videos: Array<{
+          id: string;
+          bytes: ArrayBuffer;
+          mimeType: string;
+          fileName: string;
+        }>;
         settings: unknown;
       } | null>;
       saveApplicationBackgrounds: (payload: {
         items: Array<{
+          id: string;
+          bytes: ArrayBuffer;
+          mimeType: string;
+          fileName: string;
+        }>;
+        videos?: Array<{
           id: string;
           bytes: ArrayBuffer;
           mimeType: string;

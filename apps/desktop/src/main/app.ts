@@ -145,11 +145,16 @@ type SubagentProgress = {
 const RUNTIME_TOOL_RESULT_LIMIT_BYTES = 4_096;
 const GPA_STATE_CACHE_LIMIT = 16;
 const MAX_APPLICATION_BACKGROUND_BYTES = 40 * 1024 * 1024;
+const MAX_APPLICATION_BACKGROUND_VIDEO_BYTES = 200 * 1024 * 1024;
 const APPLICATION_BACKGROUND_MIME_TYPES = new Set([
   "image/png",
   "image/jpeg",
   "image/webp",
   "image/gif"
+]);
+const APPLICATION_BACKGROUND_VIDEO_MIME_TYPES = new Set([
+  "video/webm",
+  "video/mp4"
 ]);
 
 type ApplicationBackgroundItemPayload = {
@@ -159,16 +164,27 @@ type ApplicationBackgroundItemPayload = {
   fileName: string;
 };
 
+type ApplicationBackgroundVideoPayload = {
+  id: string;
+  bytes: ArrayBuffer;
+  mimeType: string;
+  fileName: string;
+};
+
 type ApplicationBackgroundCollectionPayload = {
   items: ApplicationBackgroundItemPayload[];
+  videos?: ApplicationBackgroundVideoPayload[];
   settings: unknown;
 };
 
 type ApplicationBackgroundItemMetadata = Omit<ApplicationBackgroundItemPayload, "bytes">;
 
+type ApplicationBackgroundVideoMetadata = Omit<ApplicationBackgroundVideoPayload, "bytes">;
+
 type ApplicationBackgroundMetadata = {
   version: 2;
   items: ApplicationBackgroundItemMetadata[];
+  videos: ApplicationBackgroundVideoMetadata[];
   settings: unknown;
 };
 
@@ -2519,13 +2535,42 @@ export class DesktopBackend {
           }
         }));
         const availableItems = items.filter((item): item is ApplicationBackgroundItemPayload => item !== null);
-        return availableItems.length > 0 ? { items: availableItems, settings: metadata.settings } : null;
+        const videoMetadata = Array.isArray((metadata as Partial<ApplicationBackgroundMetadata>).videos)
+          ? (metadata as ApplicationBackgroundMetadata).videos
+          : [];
+        const videos = await Promise.all(videoMetadata.map(async (video) => {
+          if (
+            !video ||
+            typeof video.id !== "string" ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(video.id) ||
+            !APPLICATION_BACKGROUND_VIDEO_MIME_TYPES.has(video.mimeType ?? "")
+          ) {
+            return null;
+          }
+          try {
+            const bytes = await fs.readFile(path.join(appearanceDir, "backgrounds", video.id));
+            return {
+              id: video.id,
+              bytes: Uint8Array.from(bytes).buffer,
+              mimeType: video.mimeType,
+              fileName: typeof video.fileName === "string" ? video.fileName : "background"
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw error;
+          }
+        }));
+        const availableVideos = videos.filter((video): video is ApplicationBackgroundVideoPayload => video !== null);
+        return availableItems.length > 0 || availableVideos.length > 0
+          ? { items: availableItems, videos: availableVideos, settings: metadata.settings }
+          : null;
       }
 
       const legacyMetadata = metadata as Partial<LegacyApplicationBackgroundMetadata>;
       if (!APPLICATION_BACKGROUND_MIME_TYPES.has(legacyMetadata.mimeType ?? "")) return null;
       const bytes = await fs.readFile(path.join(appearanceDir, "background-image"));
       return {
+        videos: [],
         items: [{
           id: "legacy-background",
           bytes: Uint8Array.from(bytes).buffer,
@@ -2541,15 +2586,20 @@ export class DesktopBackend {
   }
 
   public async saveApplicationBackgrounds(payload: ApplicationBackgroundCollectionPayload): Promise<void> {
-    if (!Array.isArray(payload.items) || payload.items.length === 0) {
-      throw new Error("请至少保留一张背景图片。");
+    const videos = Array.isArray(payload.videos) ? payload.videos : [];
+    const hasImages = Array.isArray(payload.items) && payload.items.length > 0;
+    if (!hasImages && videos.length === 0) {
+      throw new Error("请至少保留一张背景图片或一个背景视频。");
     }
     if (payload.items.length > 50) {
       throw new Error("背景图片最多支持 50 张。");
     }
+    if (videos.length > 50) {
+      throw new Error("背景视频最多支持 50 个。");
+    }
 
     const seenIds = new Set<string>();
-    const items = payload.items.map((item) => {
+    const items = (Array.isArray(payload.items) ? payload.items : []).map((item) => {
       const bytes = new Uint8Array(item.bytes);
       if (!/^[a-zA-Z0-9_-]{1,128}$/.test(item.id) || seenIds.has(item.id)) {
         throw new Error("背景图片标识无效。");
@@ -2568,11 +2618,32 @@ export class DesktopBackend {
         fileName: path.basename(item.fileName || "background").slice(0, 255)
       };
     });
+    const seenVideoIds = new Set<string>();
+    const videoItems = videos.map((video) => {
+      const bytes = new Uint8Array(video.bytes);
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(video.id) || seenVideoIds.has(video.id)) {
+        throw new Error("背景视频标识无效。");
+      }
+      seenVideoIds.add(video.id);
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_APPLICATION_BACKGROUND_VIDEO_BYTES) {
+        throw new Error("背景视频必须小于 200 MB。");
+      }
+      if (!APPLICATION_BACKGROUND_VIDEO_MIME_TYPES.has(video.mimeType)) {
+        throw new Error("背景视频仅支持 WebM 或 MP4 格式。");
+      }
+      return {
+        id: video.id,
+        bytes,
+        mimeType: video.mimeType,
+        fileName: path.basename(video.fileName || "background").slice(0, 255)
+      };
+    });
 
     const appearanceDir = path.join(this.#layout.root, "appearance");
     const metadata: ApplicationBackgroundMetadata = {
       version: 2,
       items: items.map(({ id, mimeType, fileName }) => ({ id, mimeType, fileName })),
+      videos: videoItems.map(({ id, mimeType, fileName }) => ({ id, mimeType, fileName })),
       settings: payload.settings
     };
     const serializedMetadata = JSON.stringify(metadata, null, 2);
@@ -2584,7 +2655,7 @@ export class DesktopBackend {
     const backgroundsDir = path.join(appearanceDir, "backgrounds");
     await fs.rm(backgroundsDir, { recursive: true, force: true });
     await fs.mkdir(backgroundsDir, { recursive: true });
-    await Promise.all(items.map((item) => fs.writeFile(
+    await Promise.all([...items, ...videoItems].map((item) => fs.writeFile(
       path.join(backgroundsDir, item.id),
       Buffer.from(item.bytes.buffer, item.bytes.byteOffset, item.bytes.byteLength)
     )));

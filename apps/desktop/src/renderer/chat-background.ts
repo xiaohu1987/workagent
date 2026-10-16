@@ -2,6 +2,11 @@ export type ChatBackgroundFit = "cover" | "contain";
 
 export type ChatBackgroundMode = "none" | "image" | "dynamic";
 
+export type ChatBackgroundSource = "preset" | "custom";
+
+export type ChatBackgroundRotationOrder = "sequential" | "random";
+export type ChatBackgroundVideoMimeType = "video/webm" | "video/mp4";
+
 export type ChatBackgroundSurfaceKey =
   | "windowbar"
   | "sidebar"
@@ -23,11 +28,16 @@ export type ChatBackgroundSettings = {
   atmosphereEnabled: boolean;
   opacity: number;
   blur: number;
+  videoBlur: number;
   fit: ChatBackgroundFit;
   zoom: number;
   positionX: number;
   positionY: number;
+  dynamicSource: ChatBackgroundSource;
   fileName: string | null;
+  videoFileName: string | null;
+  videoRotationEnabled: boolean;
+  videoRotationOrder: ChatBackgroundRotationOrder;
   surfaces: ChatBackgroundSurfaces;
 };
 
@@ -64,13 +74,29 @@ export const DEFAULT_CHAT_BACKGROUND_SETTINGS: ChatBackgroundSettings = {
   atmosphereEnabled: true,
   opacity: 24,
   blur: 8,
+  videoBlur: 0,
   fit: "cover",
   zoom: 115,
   positionX: 50,
   positionY: 50,
+  dynamicSource: "preset",
   fileName: null,
+  videoFileName: null,
+  videoRotationEnabled: false,
+  videoRotationOrder: "sequential",
   surfaces: { ...DEFAULT_CHAT_BACKGROUND_SURFACES }
 };
+
+export function getChatBackgroundVideoMimeType(
+  file: Pick<File, "name" | "type">
+): ChatBackgroundVideoMimeType | null {
+  const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+  if (extension === ".webm") return "video/webm";
+  if (extension === ".mp4") return "video/mp4";
+  if (file.type === "video/webm") return "video/webm";
+  if (file.type === "video/mp4") return "video/mp4";
+  return null;
+}
 
 const SETTINGS_KEY = "codexh.chat-background.settings";
 const DATABASE_NAME = "codexh-appearance";
@@ -110,12 +136,16 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
 
   const source = value as Partial<ChatBackgroundSettings>;
   const fileName = typeof source.fileName === "string" && source.fileName.trim() ? source.fileName.trim() : null;
+  // 旧版本曾把自定义视频存成独立 "video" 模式，这里归一为 dynamic + custom。
+  const rawMode = (source as { mode?: unknown }).mode;
   const mode = source.mode === "none" || source.mode === "image" || source.mode === "dynamic"
     ? source.mode
-    : source.enabled !== false && fileName ? "image" : "none";
+    : rawMode === "video" ? "dynamic" : source.enabled !== false && fileName ? "image" : "none";
+  const dynamicSource = rawMode === "video" || source.dynamicSource === "custom" ? "custom" : "preset";
   return {
     mode,
-    enabled: mode === "image",
+    enabled: mode === "image" || (mode === "dynamic" && dynamicSource === "custom"),
+    dynamicSource,
     rotationEnabled: source.rotationEnabled === true,
     rotationIntervalSeconds: Math.round(clamp(source.rotationIntervalSeconds, 10, 600, DEFAULT_CHAT_BACKGROUND_SETTINGS.rotationIntervalSeconds)),
     motionEnabled: source.motionEnabled !== false,
@@ -124,11 +154,15 @@ export function normalizeChatBackgroundSettings(value: unknown): ChatBackgroundS
     atmosphereEnabled: source.atmosphereEnabled !== false,
     opacity: Math.round(clamp(source.opacity, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.opacity)),
     blur: Math.round(clamp(source.blur, 0, 30, DEFAULT_CHAT_BACKGROUND_SETTINGS.blur)),
+    videoBlur: Math.round(clamp(source.videoBlur, 0, 30, DEFAULT_CHAT_BACKGROUND_SETTINGS.videoBlur)),
     fit: source.fit === "contain" ? "contain" : "cover",
     zoom: Math.round(clamp(source.zoom, 100, 180, DEFAULT_CHAT_BACKGROUND_SETTINGS.zoom)),
     positionX: Math.round(clamp(source.positionX, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.positionX)),
     positionY: Math.round(clamp(source.positionY, 0, 100, DEFAULT_CHAT_BACKGROUND_SETTINGS.positionY)),
     fileName,
+    videoFileName: typeof source.videoFileName === "string" && source.videoFileName.trim() ? source.videoFileName.trim() : null,
+    videoRotationEnabled: source.videoRotationEnabled === true,
+    videoRotationOrder: source.videoRotationOrder === "random" ? "random" : "sequential",
     surfaces: normalizeChatBackgroundSurfaces(source.surfaces)
   };
 }
@@ -145,6 +179,39 @@ export function getChatBackgroundActiveIndex(
     ? images.findIndex((image) => image.fileName === settings.fileName)
     : -1;
   return index >= 0 ? index : 0;
+}
+
+export function getChatBackgroundVideoActiveIndex(
+  settings: Pick<ChatBackgroundSettings, "videoFileName">,
+  videos: ReadonlyArray<{ fileName: string }>
+): number {
+  const index = settings.videoFileName
+    ? videos.findIndex((video) => video.fileName === settings.videoFileName)
+    : -1;
+  return index >= 0 ? index : 0;
+}
+
+export function getChatBackgroundRandomNextIndex(
+  currentIndex: number,
+  itemCount: number,
+  random: () => number = Math.random
+): number {
+  const count = Math.floor(itemCount);
+  if (!Number.isFinite(count) || count < 2) return 0;
+
+  const current = Number.isFinite(currentIndex)
+    ? ((Math.floor(currentIndex) % count) + count) % count
+    : 0;
+  const sample = random();
+  const alternativeIndex = Number.isFinite(sample)
+    ? Math.min(count - 2, Math.max(0, Math.floor(sample * (count - 1))))
+    : 0;
+
+  return alternativeIndex >= current ? alternativeIndex + 1 : alternativeIndex;
+}
+
+export function getChatBackgroundBlurFilter(blur: number): string {
+  return Number.isFinite(blur) && blur > 0 ? `blur(${blur}px)` : "none";
 }
 
 export function getChatBackgroundSurfaceStyleVars(

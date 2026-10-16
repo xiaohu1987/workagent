@@ -1137,13 +1137,22 @@ export function App() {
     images: chatBackgroundImages,
     activeImageIndex: activeChatBackgroundIndex,
     setActiveImageIndex: setActiveChatBackgroundIndex,
+    videos: chatBackgroundVideos,
+    activeVideoIndex: activeChatBackgroundVideoIndex,
+    setActiveVideoIndex: setActiveChatBackgroundVideoIndex,
+    advanceVideo: advanceChatBackgroundVideo,
     settings: chatBackgroundSettings,
     inputRef: chatBackgroundInputRef,
+    videoInputRef: chatBackgroundVideoInputRef,
     imageUrl: chatBackgroundUrl,
+    videoUrl: chatBackgroundVideoUrl,
     isDragging: isChatBackgroundDragging,
     importFiles: importChatBackgroundFiles,
+    importVideoFiles: importChatBackgroundVideoFiles,
     moveImage: moveChatBackgroundImage,
     removeImage: removeChatBackgroundImage,
+    moveVideo: moveChatBackgroundVideo,
+    removeVideo: removeChatBackgroundVideo,
     updateSettings: updateChatBackgroundSettings,
     updateSurface: updateChatBackgroundSurface,
     beginDrag: beginChatBackgroundDrag,
@@ -7831,23 +7840,27 @@ export function App() {
     : skillLabCurrentProgress?.summary ?? (skillLabMode === "optimize" ? "选择用户技能和迭代次数后开始" : "填写需求和迭代次数后开始");
   const appTheme = resolveAppTheme(config?.desktop.theme);
   const showImageBackground = backgroundMode === "image" && chatBackgroundImages.length > 0;
-  const showRealtimeBackground = appTheme === "dark" && backgroundMode === "dynamic";
+  const showCustomVideoBackground = backgroundMode === "dynamic"
+    && chatBackgroundSettings.dynamicSource === "custom"
+    && chatBackgroundVideos.length > 0;
+  const showAppBackground = showImageBackground || showCustomVideoBackground;
+  const showRealtimeBackground = appTheme === "dark" && backgroundMode === "dynamic" && !showCustomVideoBackground;
 
   return (
     <div
       ref={appShellRef}
-      className={`app-shell ${showImageBackground ? "has-app-background" : ""} ${showRealtimeBackground ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+      className={`app-shell ${showAppBackground ? "has-app-background" : ""} ${showRealtimeBackground ? "has-realtime-character" : ""} ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isRightWorkspaceOpen ? "right-workspace-open" : ""
       } ${isTerminalOpen ? "terminal-open" : ""}`}
       style={{
         "--sidebar-pane-width": `${sidebarWidth}px`,
         "--right-workspace-pane-width": `${rightWorkspaceWidth}px`,
-        ...(showImageBackground
+        ...(showAppBackground
           ? getChatBackgroundSurfaceStyleVars(chatBackgroundSettings.surfaces)
           : {})
       } as React.CSSProperties}
     >
-      {showImageBackground ? <AppBackgroundLayer images={chatBackgroundImages} activeIndex={activeChatBackgroundIndex} settings={chatBackgroundSettings} /> : null}
+      {showAppBackground ? <AppBackgroundLayer images={chatBackgroundImages} videos={chatBackgroundVideos} activeIndex={activeChatBackgroundIndex} activeVideoIndex={activeChatBackgroundVideoIndex} settings={chatBackgroundSettings} onVideoEnded={advanceChatBackgroundVideo} /> : null}
       {showRealtimeBackground ? <RealtimeBackgroundLayer scene={realtimeEnhancement.scene} /> : null}
       <header className="windowbar">
         <div className="windowbar-left">
@@ -8648,17 +8661,25 @@ export function App() {
               {settingsTab === "appearance" ? (
                 <AppearanceSettingsPage
                   inputRef={chatBackgroundInputRef}
+                  videoInputRef={chatBackgroundVideoInputRef}
                   images={chatBackgroundImages}
                   activeImageIndex={activeChatBackgroundIndex}
                   imageUrl={chatBackgroundUrl}
+                  videos={chatBackgroundVideos}
+                  activeVideoIndex={activeChatBackgroundVideoIndex}
+                  videoUrl={chatBackgroundVideoUrl}
                   settings={chatBackgroundSettings}
                   backgroundMode={backgroundMode}
                   dynamicBackgroundDisabled={appTheme === "light"}
                   isDragging={isChatBackgroundDragging}
                   onImportFiles={importChatBackgroundFiles}
+                  onImportVideos={importChatBackgroundVideoFiles}
                   onSelectImage={setActiveChatBackgroundIndex}
                   onMoveImage={moveChatBackgroundImage}
                   onRemoveImage={removeChatBackgroundImage}
+                  onSelectVideo={setActiveChatBackgroundVideoIndex}
+                  onMoveVideo={moveChatBackgroundVideo}
+                  onRemoveVideo={removeChatBackgroundVideo}
                   onUpdateSettings={updateChatBackgroundSettings}
                   onBackgroundModeChange={setBackgroundMode}
                   onUpdateSurface={updateChatBackgroundSurface}

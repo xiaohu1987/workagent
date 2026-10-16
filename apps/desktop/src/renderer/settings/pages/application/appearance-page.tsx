@@ -2,9 +2,11 @@ import { useEffect, useState, type CSSProperties, type MutableRefObject, type Po
 import { IconImage, IconRefresh, IconTrash, IconUpload } from "../../../icons";
 import {
   CHAT_BACKGROUND_SURFACE_OPTIONS,
+  getChatBackgroundBlurFilter,
   getChatBackgroundTransform,
   type ChatBackgroundMode,
   type ChatBackgroundSettings,
+  type ChatBackgroundSource,
   type ChatBackgroundSurfaceKey,
   type ChatBackgroundSurfaces
 } from "../../../chat-background";
@@ -31,6 +33,15 @@ const CHAT_BACKGROUND_MODE_OPTIONS: ReadonlyArray<{
   { value: "dynamic", label: "动态背景" }
 ];
 
+const CHAT_BACKGROUND_SOURCE_OPTIONS: ReadonlyArray<{
+  value: ChatBackgroundSource;
+  label: string;
+  hint: string;
+}> = [
+  { value: "preset", label: "定制", hint: "随对话状态实时变化的内置动态画面" },
+  { value: "custom", label: "自定义", hint: "上传 WebM 或 MP4 视频作为动态背景" }
+];
+
 function getRangeProgressStyle(value: number, minimum: number, maximum: number): CSSProperties {
   const progress = Math.min(100, Math.max(0, ((value - minimum) / (maximum - minimum)) * 100));
   return { "--range-progress": `${progress}%` } as CSSProperties;
@@ -38,17 +49,25 @@ function getRangeProgressStyle(value: number, minimum: number, maximum: number):
 
 type AppearanceSettingsPageProps = {
   inputRef: MutableRefObject<HTMLInputElement | null>;
+  videoInputRef: MutableRefObject<HTMLInputElement | null>;
   images: ChatBackgroundImage[];
   activeImageIndex: number;
   imageUrl: string | null;
+  videos: ChatBackgroundImage[];
+  activeVideoIndex: number;
+  videoUrl: string | null;
   settings: ChatBackgroundSettings;
   backgroundMode: ChatBackgroundMode;
   dynamicBackgroundDisabled: boolean;
   isDragging: boolean;
   onImportFiles: (files: File[]) => Promise<void>;
+  onImportVideos: (files: File[]) => Promise<void>;
   onSelectImage: (index: number) => void;
   onMoveImage: (sourceId: string, targetId: string) => Promise<void>;
   onRemoveImage: (id: string) => Promise<void>;
+  onSelectVideo: (index: number) => void;
+  onMoveVideo: (sourceId: string, targetId: string) => Promise<void>;
+  onRemoveVideo: (id: string) => Promise<void>;
   onUpdateSettings: (patch: ChatBackgroundSettingsPatch) => void;
   onBackgroundModeChange: (mode: ChatBackgroundMode) => void;
   onUpdateSurface: (key: ChatBackgroundSurfaceKey, value: number) => void;
@@ -61,17 +80,25 @@ type AppearanceSettingsPageProps = {
 
 export function AppearanceSettingsPage({
   inputRef,
+  videoInputRef,
   images,
   activeImageIndex,
   imageUrl,
+  videos,
+  activeVideoIndex,
+  videoUrl,
   settings,
   backgroundMode,
   dynamicBackgroundDisabled,
   isDragging,
   onImportFiles,
+  onImportVideos,
   onSelectImage,
   onMoveImage,
   onRemoveImage,
+  onSelectVideo,
+  onMoveVideo,
+  onRemoveVideo,
   onUpdateSettings,
   onBackgroundModeChange,
   onUpdateSurface,
@@ -83,9 +110,15 @@ export function AppearanceSettingsPage({
 }: AppearanceSettingsPageProps) {
   // 界面展示的页签跟随实际生效的背景模式;但没有图片时也允许切到"图片背景"页签去导入
   const [viewMode, setViewMode] = useState<ChatBackgroundMode>(backgroundMode);
+  const [videoPreviewError, setVideoPreviewError] = useState<string | null>(null);
   useEffect(() => {
     setViewMode(backgroundMode);
   }, [backgroundMode]);
+  useEffect(() => {
+    setVideoPreviewError(null);
+  }, [videoUrl]);
+
+  const dynamicSource = settings.dynamicSource;
 
   const modePanel = (
     <section className="chat-background-mode-panel" aria-label="背景模式">
@@ -153,23 +186,66 @@ export function AppearanceSettingsPage({
             if (files.length) void onImportFiles(files);
           }}
         />
+        <input
+          ref={videoInputRef}
+          className="chat-background-file-input"
+          type="file"
+          multiple
+          accept="video/webm,video/mp4,.webm,.mp4"
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.currentTarget.value = "";
+            if (files.length) void onImportVideos(files);
+          }}
+        />
 
         <div className="chat-background-editor">
           <div className="chat-background-preview-column">
             {viewMode === "dynamic" ? (
-              <div className="chat-background-preview chat-background-preview-dynamic">
-                <video src={idleVideo} autoPlay muted loop playsInline aria-label="动态背景待机画面预览" />
-                <div className="chat-background-preview-ui" aria-hidden="true">
-                  <div className="chat-background-preview-bar">
-                    <span className="chat-background-preview-avatar" />
-                    <strong>CodeXH</strong>
-                  </div>
-                  <div className="chat-background-preview-messages">
-                    <span className="preview-bubble preview-bubble-assistant">动态背景随对话状态实时变化。</span>
-                    <span className="preview-bubble preview-bubble-user">界面内容保持清晰可读。</span>
+              dynamicSource === "custom" && videoUrl ? (
+                <div className="chat-background-preview chat-background-preview-dynamic">
+                  <video
+                    src={videoUrl}
+                    autoPlay
+                    muted
+                    loop
+                    playsInline
+                    preload="auto"
+                    aria-label="自定义动态背景预览"
+                    onLoadedMetadata={(event) => { void event.currentTarget.play().catch(() => setVideoPreviewError("浏览器未能启动视频播放")); }}
+                    onError={(event) => setVideoPreviewError(`视频解码失败（错误码 ${event.currentTarget.error?.code ?? "未知"}）`)}
+                    style={{
+                      filter: getChatBackgroundBlurFilter(settings.videoBlur),
+                      opacity: settings.opacity / 100
+                    }}
+                  />
+                  {videoPreviewError ? <div className="chat-background-video-error" role="status">{videoPreviewError}</div> : null}
+                  <div className="chat-background-preview-ui" aria-hidden="true">
+                    <div className="chat-background-preview-bar">
+                      <span className="chat-background-preview-avatar" />
+                      <strong>CodeXH</strong>
+                    </div>
+                    <div className="chat-background-preview-messages">
+                      <span className="preview-bubble preview-bubble-assistant">自定义视频背景播放中。</span>
+                      <span className="preview-bubble preview-bubble-user">界面内容保持清晰可读。</span>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="chat-background-preview chat-background-preview-dynamic">
+                  <video src={idleVideo} autoPlay muted loop playsInline aria-label="动态背景待机画面预览" />
+                  <div className="chat-background-preview-ui" aria-hidden="true">
+                    <div className="chat-background-preview-bar">
+                      <span className="chat-background-preview-avatar" />
+                      <strong>CodeXH</strong>
+                    </div>
+                    <div className="chat-background-preview-messages">
+                      <span className="preview-bubble preview-bubble-assistant">动态背景随对话状态实时变化。</span>
+                      <span className="preview-bubble preview-bubble-user">界面内容保持清晰可读。</span>
+                    </div>
+                  </div>
+                </div>
+              )
             ) : (
               <div
                 className={`chat-background-preview ${imageUrl ? "is-positionable" : ""} ${isDragging ? "is-dragging" : ""}`}
@@ -348,18 +424,261 @@ export function AppearanceSettingsPage({
               </>
             ) : null}
 
+            {viewMode === "dynamic" ? (
+              <section className={`chat-background-library ${dynamicSource === "custom" ? "is-custom-dynamic" : ""}`} aria-label="自定义动态背景">
+                <div className="chat-background-mode-options chat-background-source-options" role="radiogroup" aria-label="动态背景来源">
+                  {CHAT_BACKGROUND_SOURCE_OPTIONS.map((option) => (
+                    <label
+                      key={option.value}
+                      className={`chat-background-mode-option ${dynamicSource === option.value ? "is-selected" : ""}`}
+                      title={option.hint}
+                    >
+                      <input
+                        type="radio"
+                        name="chat-background-source"
+                        value={option.value}
+                        checked={dynamicSource === option.value}
+                        onChange={() => onUpdateSettings({
+                          dynamicSource: option.value,
+                          enabled: option.value === "custom",
+                          mode: "dynamic"
+                        })}
+                      />
+                      <span className="chat-background-mode-radio" aria-hidden="true" />
+                      <span className="chat-background-mode-copy">
+                        <strong>{option.label}</strong>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+
+                {dynamicSource === "custom" ? (
+                  <>
+                    <div className="chat-background-library-header">
+                      <div className="chat-background-control-label">
+                        <span>背景视频</span>
+                        <em>{videos.length ? "拖动视频调整轮播顺序" : "导入 WebM 或 MP4 视频作为动态背景"}</em>
+                      </div>
+                      <button type="button" className="chat-background-add-button" onClick={() => videoInputRef.current?.click()}>
+                        <IconUpload />
+                        <span>{videos.length ? "添加视频" : "导入视频"}</span>
+                      </button>
+                    </div>
+                    {videos.length > 0 ? (
+                      <div className="chat-background-image-list">
+                        {videos.map((video, index) => (
+                          <div
+                            key={video.id}
+                            className={`chat-background-image-item ${index === activeVideoIndex ? "is-active" : ""}`}
+                            draggable
+                            onDragStart={(event) => event.dataTransfer.setData("text/plain", video.id)}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              const sourceId = event.dataTransfer.getData("text/plain");
+                              if (sourceId) void onMoveVideo(sourceId, video.id);
+                            }}
+                          >
+                            <button type="button" className="chat-background-image-select" onClick={() => onSelectVideo(index)} title={`预览 ${video.fileName}`}>
+                              <video
+                                src={video.url}
+                                autoPlay
+                                muted
+                                loop
+                                playsInline
+                                preload="auto"
+                                onLoadedMetadata={(event) => { void event.currentTarget.play().catch(() => undefined); }}
+                              />
+                              <span>{video.fileName}</span>
+                            </button>
+                            <button type="button" className="chat-background-image-remove" onClick={() => void onRemoveVideo(video.id)} title={`删除 ${video.fileName}`} aria-label={`删除 ${video.fileName}`}>
+                              <IconTrash />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <button type="button" className="chat-background-library-empty" onClick={() => videoInputRef.current?.click()}>
+                        <IconImage />
+                        <span>导入 WebM 或 MP4 视频开始设置</span>
+                      </button>
+                    )}
+                    <div className="chat-background-rotation-row">
+                      <div>
+                        <strong>视频轮播</strong>
+                        <span>{videos.length < 2 ? "添加至少两个视频后可用" : "每段视频播完后按顺序或随机切换"}</span>
+                      </div>
+                      <label className="chat-background-toggle">
+                        <input
+                          type="checkbox"
+                          checked={settings.videoRotationEnabled}
+                          disabled={videos.length < 2}
+                          onChange={(event) => onUpdateSettings({ videoRotationEnabled: event.target.checked })}
+                        />
+                        <span aria-hidden="true" />
+                        <em>{settings.videoRotationEnabled ? "开启" : "关闭"}</em>
+                      </label>
+                    </div>
+                    <div className="chat-background-rotation-row">
+                      <div>
+                        <strong>轮播方式</strong>
+                        <span>播完当前视频后切换到下一个</span>
+                      </div>
+                      <div className="chat-background-segmented" role="group" aria-label="视频轮播方式">
+                        <button
+                          type="button"
+                          className={settings.videoRotationOrder === "sequential" ? "active" : ""}
+                          disabled={videos.length < 2}
+                          onClick={() => onUpdateSettings({ videoRotationOrder: "sequential" })}
+                        >
+                          顺序
+                        </button>
+                        <button
+                          type="button"
+                          className={settings.videoRotationOrder === "random" ? "active" : ""}
+                          disabled={videos.length < 2}
+                          onClick={() => onUpdateSettings({ videoRotationOrder: "random" })}
+                        >
+                          随机
+                        </button>
+                      </div>
+                    </div>
+                    <label className="chat-background-rotation-interval custom-video-rotation-interval">
+                      <span>切换间隔</span>
+                      <input
+                        type="range"
+                        min="10"
+                        max="600"
+                        step="10"
+                        value={settings.rotationIntervalSeconds}
+                        style={getRangeProgressStyle(settings.rotationIntervalSeconds, 10, 600)}
+                        disabled={videos.length < 2 || !settings.videoRotationEnabled}
+                        onChange={(event) => onUpdateSettings({ rotationIntervalSeconds: Number(event.target.value) })}
+                      />
+                      <output>{settings.rotationIntervalSeconds} 秒</output>
+                    </label>
+                  </>
+                ) : null}
+              </section>
+            ) : null}
+
           </div>
 
-          <div className="chat-background-controls">
+          <div className={`chat-background-controls ${viewMode === "dynamic" && dynamicSource === "custom" ? "is-custom-dynamic" : ""}`}>
             {modePanel}
 
             {viewMode === "dynamic" ? (
-              <div className="chat-background-heading">
-                <div>
-                  <strong>动态背景</strong>
-                  <span>待机画面循环播放，随对话状态自动切换</span>
+              dynamicSource === "custom" ? (
+                <>
+                  <div className="chat-background-heading">
+                    <div>
+                      <strong>自定义动态背景</strong>
+                      <span>上传 WebM 或 MP4 视频，播放结束后切换，可多视频轮播</span>
+                    </div>
+                  </div>
+
+                  <label className="chat-background-control-group custom-video-blur-control">
+                    <div className="chat-background-control-label">
+                      <span>模糊度</span>
+                      <output>{settings.videoBlur}px</output>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="30"
+                      step="1"
+                      value={settings.videoBlur}
+                      style={getRangeProgressStyle(settings.videoBlur, 0, 30)}
+                      onChange={(event) => onUpdateSettings({ videoBlur: Number(event.target.value) })}
+                    />
+                  </label>
+
+                  <label className="chat-background-control-group custom-video-opacity-control">
+                    <div className="chat-background-control-label">
+                      <span>背景透明度</span>
+                      <output>{settings.opacity}%</output>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={settings.opacity}
+                      style={getRangeProgressStyle(settings.opacity, 0, 100)}
+                      onChange={(event) => onUpdateSettings({ opacity: Number(event.target.value) })}
+                    />
+                  </label>
+
+                  <div className="chat-background-control-group chat-background-fit-control">
+                    <div className="chat-background-control-label">
+                      <span>填充方式</span>
+                    </div>
+                    <div className="chat-background-segmented" role="group" aria-label="背景填充方式">
+                      <button
+                        type="button"
+                        className={settings.fit === "cover" ? "active" : ""}
+                        onClick={() => onUpdateSettings({ fit: "cover" })}
+                      >
+                        填满
+                      </button>
+                      <button
+                        type="button"
+                        className={settings.fit === "contain" ? "active" : ""}
+                        onClick={() => onUpdateSettings({ fit: "contain" })}
+                      >
+                        完整显示
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="chat-background-control-group chat-background-surface-group">
+                    <div className="chat-background-control-label">
+                      <span>模块不透明度</span>
+                      <em>数值越高，遮罩越实</em>
+                    </div>
+                    <div className="chat-background-surface-controls">
+                      {CHAT_BACKGROUND_SURFACE_OPTIONS.map((option) => (
+                        <label key={option.key} title={option.hint}>
+                          <span>{option.label}</span>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={settings.surfaces[option.key]}
+                            style={getRangeProgressStyle(settings.surfaces[option.key], 0, 100)}
+                            disabled={!settings.enabled}
+                            onChange={(event) => onUpdateSurface(option.key, Number(event.target.value))}
+                          />
+                          <output>{settings.surfaces[option.key]}%</output>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="chat-background-actions">
+                    <button
+                      type="button"
+                      onClick={onResetSurfaces}
+                      title="将模块不透明度恢复为默认值"
+                    >
+                      <IconRefresh />
+                      <span>重置</span>
+                    </button>
+                    <button type="button" className="background-action-danger" onClick={() => void onClear()} disabled={videos.length === 0 && images.length === 0} title="清除应用背景">
+                      <IconTrash />
+                      <span>清除</span>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="chat-background-heading">
+                  <div>
+                    <strong>动态背景</strong>
+                    <span>待机画面循环播放，随对话状态自动切换</span>
+                  </div>
                 </div>
-              </div>
+              )
             ) : (
               <>
             <div className="chat-background-heading">

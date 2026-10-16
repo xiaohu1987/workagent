@@ -14,6 +14,12 @@ const api = {
       mimeType: string;
       fileName: string;
     }>;
+    videos?: Array<{
+      id: string;
+      bytes: ArrayBuffer;
+      mimeType: string;
+      fileName: string;
+    }>;
     settings: unknown;
   }) => ipcRenderer.invoke("appearance:background:save", payload),
   saveApplicationBackgroundSettings: (settings: unknown) =>
