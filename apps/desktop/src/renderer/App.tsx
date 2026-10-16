@@ -6090,7 +6090,7 @@ export function App() {
       // The blank new-task layout stays on screen while the thread is created
       // (see the keepNewTaskLayout call below). Removing it here would uncover
       // the welcome view for the frames the thread creation IPC takes.
-      setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString() });
+      setComposerSubmission({ content: inputContent, startedAt: new Date().toISOString(), stage: "creating" });
     }
 
     let threadId = targetThreadId;
@@ -6112,6 +6112,8 @@ export function App() {
       seedOptimisticThreadSnapshot(thread);
       if (isNewTaskComposerOpen) setIsNewTaskComposerOpen(false);
       if (branchToApply) {
+        // 切分支（checkout）可能耗时数秒：切换为居中任务卡，给出明确的三步进度。
+        setComposerSubmission((current) => current ? { ...current, stage: "switching", branch: branchToApply } : current);
         try {
           const branchResult = (await window.codexh.switchGitBranch({ threadId, branch: branchToApply })) as
             | GitActionResult
@@ -6123,6 +6125,8 @@ export function App() {
           showNotice("切换分支失败", {
             message: branchError instanceof Error ? branchError.message : "请手动切换分支后重试。"
           });
+        } finally {
+          setComposerSubmission((current) => current ? { ...current, stage: "creating", branch: undefined } : current);
         }
       }
       try {

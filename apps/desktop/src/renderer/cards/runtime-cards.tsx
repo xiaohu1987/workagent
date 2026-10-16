@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type { GpaStage, PendingResumeThread, QueuedMessageRecord, SubagentResultEnvelope, ThreadRecord } from "@shared-types";
-import { IconBolt, IconCheck, IconChevronRight, IconClose, IconCompose, IconGuide, IconHelpCircle, IconSpinner, IconStop, IconTerminal } from "../icons";
+import { IconBolt, IconCheck, IconChevronRight, IconClose, IconCompose, IconGitBranch, IconGuide, IconHelpCircle, IconSpinner, IconStop, IconTerminal } from "../icons";
 import { getToolProcessingLabel, type SkillNameMap } from "../lib/conversation-utils";
 import { ToolActivityIcon } from "../timeline/transcript";
 import type { ComposerSubmission, RuntimeActivity, RuntimeActivityEntry, RuntimeProgress } from "../core/app-types";
@@ -769,6 +769,25 @@ export function ComposerSubmissionStatus({ submission }: { submission: ComposerS
     : isSlow
       ? "正在启动任务"
       : "正在准备任务";
+
+  // 切分支（checkout）可能耗时数秒：渲染居中毛玻璃任务卡，给出明确的三步进度。
+  if (submission.stage === "switching" && submission.branch) {
+    return (
+      <div className="composer-submission-overlay" aria-live="polite">
+        <section className="composer-submission-task-card">
+          <span className="composer-submission-task-ring" aria-hidden="true"><IconGitBranch /></span>
+          <strong className="composer-submission-task-title">正在切换分支</strong>
+          <code className="composer-submission-task-branch" title={submission.branch}>{submission.branch}</code>
+          <div className="composer-submission-task-steps">
+            <span className="done"><i className="dot" aria-hidden="true"><IconCheck /></i>创建任务</span>
+            <span className="doing"><i className="dot" aria-hidden="true" />切换分支</span>
+            <span className="todo"><i className="dot" aria-hidden="true" />发送消息</span>
+          </div>
+          <span className="composer-submission-task-elapsed">已用时 {formatElapsedClock(elapsedMs)}</span>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <section className={`composer-submission-status ${isSlow ? "slow" : ""}`} aria-live="polite">

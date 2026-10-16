@@ -105,6 +105,10 @@ export type RuntimeProgress = {
 export type ComposerSubmission = {
   content: string;
   startedAt: string;
+  /** 提交阶段：switching = 正在切换工作空间分支（渲染居中任务卡），其余按耗时显示准备文案。 */
+  stage?: "creating" | "switching" | "sending";
+  /** switching 阶段的目标分支名。 */
+  branch?: string;
 };
 
 export type RuntimeActivityEntry =
